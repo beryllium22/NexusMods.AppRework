@@ -118,26 +118,6 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
         await using var fileStream = Destination.Open(FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
 
         fileStream.Position = (long)_state.TotalBytesDownloaded.Value;
-        
-        await using var outputStream = new StreamProgressWrapper<IJobContext<HttpDownloadJob>>(
-            fileStream,
-            context,
-            (state, tuple) =>
-            {
-                var (bytesWritten, speed) = tuple;
-
-                _state.TotalBytesDownloaded = bytesWritten;
-
-                state.SetPercent(bytesWritten, _state.ContentLength.ValueOr(static () => Size.One));
-                state.SetRateOfProgress(speed);
-            }
-        );
-
-        if (_state.ContentLength.HasValue)
-        {
-            var contentLength = (long)_state.ContentLength.Value.Value;
-            if (outputStream.Length != contentLength) outputStream.SetLength(contentLength);
-        }
 
         await context.YieldAsync();
         using var request = PrepareRequest(out var isRangeRequest);
@@ -151,63 +131,91 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
 
         if (response.StatusCode == HttpStatusCode.OK)
         {
-            // NOTE(erri120): We might've not gotten the content length in the initial HEAD request.
-            if (!_state.ContentLength.HasValue)
-            {
-                // For full requests only, the response should contain the content length at this point.
-                // For range requests, the content length equals the length of the range, so we can't use that here.
-                var newContentLength = response.Content.Headers.ContentLength;
-                if (newContentLength is not null)
-                {
-                    _state.ContentLength = Size.FromLong(newContentLength.Value);
-                    outputStream.SetLength(newContentLength.Value);
-                }
-            }
-        } else if (response.StatusCode == HttpStatusCode.PartialContent)
-        {
-            if (!_state.ContentLength.HasValue)
-            {
-                // Responses to range requests should have this header
-                // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Range
-                var contentRange = response.Content.Headers.ContentRange;
-                var length = contentRange?.Length;
-                if (length is not null)
-                {
-                    _state.ContentLength = Size.FromLong(length.Value);
-                    outputStream.SetLength(length.Value);
-                }
-            }
-        }
+            // A 200 always contains a full representation, including a retry on a server that
+            // never advertised ranges. Replace the partial file instead of appending to it.
+            if (_state.TotalBytesDownloaded > Size.Zero)
+                Logger.LogInformation("Server returned the full download from `{PageUri}`; restarting from scratch", DownloadPageUri);
 
-        if (isRangeRequest && response.StatusCode == HttpStatusCode.OK)
-        {
-            // NOTE(erri120): We asked the server whether it supports range requests, the server responded with yes,
-            // then we do a range request, and suddenly the server changed its mind and says no...
-            Logger.LogWarning("Server `{ServerName}` responded with 200 to a valid range request for download from `{PageUri}`. The download will be reset", response.Headers.Server.ToString(), DownloadPageUri);
-
-            // NOTE(erri120): The only thing we can do here is to reset everything and start from scratch.
             _state.TotalBytesDownloaded = Size.Zero;
-            outputStream.Position = 0;
-            _state.AcceptRanges = false;
+            fileStream.Position = 0;
+            fileStream.SetLength(0);
+
+            // GET describes the bytes we are about to write; HEAD can be stale after If-Range
+            // fails. In particular, do not retain the old size for a new chunked response.
+            var length = response.Content.Headers.ContentLength;
+            _state.ContentLength = length is not null ? Size.FromLong(length.Value) : Optional<Size>.None;
+            _state.ETag = response.Headers.ETag;
+            if (isRangeRequest) _state.AcceptRanges = false;
+        }
+        else if (response.StatusCode == HttpStatusCode.PartialContent)
+        {
+            var range = response.Content.Headers.ContentRange;
+            var totalLength = range?.Length ?? (_state.ContentLength.HasValue ? (long)_state.ContentLength.Value.Value : (long?)null);
+            var bodyLength = response.Content.Headers.ContentLength;
+
+            // We requested all remaining bytes. A partial response is usable only when it
+            // starts exactly at our offset and reaches the end of the same representation.
+            // Content-Length on a 206 is the body length, not the total file size.
+            if (!isRangeRequest || range is null || !string.Equals(range.Unit, "bytes", StringComparison.OrdinalIgnoreCase)
+                || range.From != fileStream.Position || totalLength is null || range.To != totalLength - 1
+                || (bodyLength is not null && bodyLength != range.To - range.From + 1)
+                || (_state.ContentLength.HasValue && (long)_state.ContentLength.Value.Value != totalLength)
+                || (response.Headers.ETag is { } etag && (!_state.ETag.HasValue || !etag.Equals(_state.ETag.Value))))
+            {
+                throw ResetAfterInvalidResponse("The partial download does not match the requested range or representation");
+            }
+
+            _state.ContentLength = Size.FromLong(totalLength.Value);
+        }
+        else
+        {
+            throw ResetAfterInvalidResponse($"Unexpected download response status {(int)response.StatusCode}");
         }
 
+        if (_state.ContentLength.HasValue)
+            fileStream.SetLength((long)_state.ContentLength.Value.Value);
+
+        // Start reporting only after the response has established the offset and length.
+        // Otherwise the timer can restore stale progress while a full response resets it.
+        var finalPosition = fileStream.Position;
         try
         {
-            await response.Content.CopyToAsync(outputStream, context.CancellationToken);
-        }
-        catch (TaskCanceledException)
-        {
-            throw;
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning(e, "Exception while downloading from `{PageUri}`, downloaded `{DownloadedBytes}` from `{TotalBytes}` bytes", DownloadPageUri, outputStream.Position, outputStream.Length);
-            throw;
+            await using var outputStream = new StreamProgressWrapper<IJobContext<HttpDownloadJob>>(
+                fileStream,
+                context,
+                (state, tuple) =>
+                {
+                    var (bytesWritten, speed) = tuple;
+                    _state.TotalBytesDownloaded = bytesWritten;
+                    state.SetPercent(bytesWritten, _state.ContentLength.ValueOr(static () => Size.One));
+                    state.SetRateOfProgress(speed);
+                });
+
+            try
+            {
+                await response.Content.CopyToAsync(outputStream, context.CancellationToken);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                Logger.LogWarning(e, "Exception while downloading from `{PageUri}`, downloaded `{DownloadedBytes}` bytes", DownloadPageUri, outputStream.Position);
+                throw;
+            }
+            finally
+            {
+                finalPosition = outputStream.Position;
+            }
         }
         finally
         {
-            _state.TotalBytesDownloaded = Size.FromLong(outputStream.Position);
+            // DisposeAsync waits for outstanding timer callbacks before publishing the final
+            // offset, so a late tick cannot overwrite the value used by the next attempt.
+            _state.TotalBytesDownloaded = Size.FromLong(finalPosition);
         }
+
+        // Preallocation makes Length look correct even when the body stopped early. Check
+        // actual written bytes before declaring success and reset before the retry pipeline.
+        if (_state.ContentLength.HasValue && finalPosition != (long)_state.ContentLength.Value.Value)
+            throw ResetAfterInvalidResponse($"Download wrote {finalPosition} bytes but expected {_state.ContentLength.Value.Value}");
 
         // Ensure progress is set to 100% when download completes
         if (_state.ContentLength.HasValue)
@@ -216,6 +224,12 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
             context.SetPercent(Size.One, Size.One);
 
         return Destination;
+    }
+
+    private HttpIOException ResetAfterInvalidResponse(string message)
+    {
+        _state.TotalBytesDownloaded = Size.Zero;
+        return new HttpIOException(HttpRequestError.InvalidResponse, message);
     }
     
     private HttpRequestMessage PrepareRequest(out bool isRangeRequest)
@@ -226,7 +240,7 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
         if (!_state.AcceptRanges.Value || _state.TotalBytesDownloaded == Size.Zero)
         {
             // NOTE(erri120): Using If-Match to ensure that what we're downloading didn't suddenly change
-            if (_state.ETag.HasValue)
+            if (_state.ETag.HasValue && !_state.ETag.Value.IsWeak)
             {
                 // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-Match
                 request.Headers.IfMatch.Add(_state.ETag.Value);
@@ -248,15 +262,7 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
 
             // NOTE(erri120): As such, we might not know the content length, but since we download
             // in serial, we can omit the end position to request all remaining bytes
-            var range = _state.ContentLength.HasValue
-                ? new RangeHeaderValue(
-                    from: (long)_state.TotalBytesDownloaded.Value,
-                    to: (long)_state.ContentLength.Value.Value
-                )
-                : new RangeHeaderValue(
-                    from: (long)_state.TotalBytesDownloaded.Value,
-                    to: null
-                );
+            var range = new RangeHeaderValue(from: (long)_state.TotalBytesDownloaded.Value, to: null);
 
             // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range
             request.Headers.Range = range;
@@ -280,10 +286,24 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
         // https://datatracker.ietf.org/doc/html/rfc7233#section-5.1.2
         // "bytes" and "none" are the only range units we care about,
         // "none" meaning the server doesn't support ranges
-        _state.AcceptRanges = response.Headers.AcceptRanges.Contains("bytes");
-        _state.ETag = response.Headers.ETag;
-
+        var etag = response.Headers.ETag;
         var contentLength = response.Content.Headers.ContentLength;
+
+        // Never attach a new validator to bytes downloaded under an old one. Without a
+        // matching strong validator we cannot safely combine separate responses (RFC 9110,
+        // sections 13.1.5 and 15.3.7.3), so resume falls back to a complete download.
+        if (_state.TotalBytesDownloaded > Size.Zero
+            && (!_state.ETag.HasValue || _state.ETag.Value.IsWeak || etag is null || etag.IsWeak
+                || !_state.ETag.Value.Equals(etag)
+                || (contentLength is not null && (_state.TotalBytesDownloaded.Value >= (ulong)contentLength.Value
+                    || (_state.ContentLength.HasValue && _state.ContentLength.Value.Value != (ulong)contentLength.Value)))))
+        {
+            Logger.LogInformation("Download metadata changed or has no strong validator for `{PageUri}`; restarting from scratch", DownloadPageUri);
+            _state.TotalBytesDownloaded = Size.Zero;
+        }
+
+        _state.AcceptRanges = response.Headers.AcceptRanges.Contains("bytes");
+        _state.ETag = etag;
         _state.ContentLength = contentLength is not null ? Size.FromLong(contentLength.Value) : Optional<Size>.None;
     }
 

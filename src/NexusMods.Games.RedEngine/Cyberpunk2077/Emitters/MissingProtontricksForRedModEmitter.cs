@@ -32,7 +32,7 @@ public partial class MissingProtontricksForRedModEmitter : ILoadoutDiagnosticEmi
             yield break;
 
         // If there is no REDmod EXE, we don't need Protontricks.
-        if (redModPath.FileExists)
+        if (!redModPath.FileExists)
             yield break;
 
         var installInfo = await _protontricksDependency.QueryInstallationInformation(cancellationToken);

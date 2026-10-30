@@ -10,6 +10,10 @@ on:
       - "tests/**"
       - "**.props"
       - "**.targets"
+      - "NexusMods.App.sln"
+      - "global.json"
+      - ".gitmodules"
+      - "extern/**"
   pull_request:
     branches: [ main ]
     paths:
@@ -18,20 +22,100 @@ on:
       - "tests/**"
       - "**.props"
       - "**.targets"
+      - "NexusMods.App.sln"
+      - "global.json"
+      - ".gitmodules"
+      - "extern/**"
     types: [ opened, synchronize, reopened, ready_for_review ]
 
-jobs:
-  draft:
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fails because it's a draft PR
-        run: exit 1
+permissions:
+  contents: read
 
+concurrency:
+  group: clean-environment-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  VSTEST_TESTHOST_SHUTDOWN_TIMEOUT: "60000"
+  # Keep packages on the checkout volume so native dependencies can be hardlinked
+  # into the many test outputs, including on Windows runners with separate drives.
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
   build-and-test:
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    uses: Nexus-Mods/NexusMods.App.Meta/.github/workflows/dotnet-build-and-test-with-osx.yaml@main
-    with:
-      extra-test-args: "--blame-hang-timeout 20m"
-      test-filter: "RequiresNetworking!=True&FlakeyTest!=True"
-      codecov-flags: ",clean_environment_tests"
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, windows-2022 ]
+
+    steps:
+      - name: Check out source and pinned submodules
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up .NET 9
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Restore
+        run: dotnet restore NexusMods.App.sln
+
+      - name: Build
+        # MSBuild uses separate switches for project outputs and copied package
+        # dependencies. The latter prevents repeating every native runtime in
+        # every test directory. Source files and test fixtures remain copies.
+        run: >-
+          dotnet build NexusMods.App.sln --configuration Release --no-restore
+          -p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true
+          -p:CreateHardLinksForCopyLocalIfPossible=true
+
+      - name: Run tests without live service credentials
+        shell: pwsh
+        env:
+          TEST_FILTER: "RequiresNetworking!=True&RequiresApiKey!=True&FlakeyTest!=True"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failedProjects = @()
+          $solutionProjects = dotnet sln NexusMods.App.sln list
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to enumerate solution projects.' }
+          $projects = @($solutionProjects | Where-Object { $_ -like '*.Tests.csproj' } | ForEach-Object { Get-Item $_.Replace('\', '/') } | Sort-Object FullName)
+          if ($projects.Count -eq 0) { throw 'No test projects found.' }
+
+          foreach ($project in $projects) {
+            [xml] $projectXml = Get-Content $project.FullName -Raw
+            $usesTUnit = @($projectXml.Project.ItemGroup.PackageReference.Include) -contains 'TUnit'
+
+            if ($usesTUnit) {
+              # SDK and backend tests use local fixtures. TUnit uses a different
+              # runner and must not silently ignore the xUnit --filter option.
+              dotnet run --project $project.FullName --configuration Release --no-build --no-restore
+            } else {
+              dotnet test $project.FullName --configuration Release --no-build --no-restore --filter $env:TEST_FILTER --logger "trx;LogFileName=$($project.BaseName).trx" --results-directory TestResults --blame-hang-timeout 10m
+            }
+
+            if ($LASTEXITCODE -ne 0) { $failedProjects += $project.BaseName }
+          }
+
+          if ($failedProjects.Count -gt 0) {
+            throw "Failed test projects: $($failedProjects -join ', ')"
+          }
+
+      - name: Upload test results and failed snapshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            TestResults/**/*.trx
+            tests/**/*.received.*
+          if-no-files-found: ignore
+          retention-days: 7
