@@ -14,7 +14,9 @@ try {
 
     # Keep the manual installation mode: inherited archive builds query the
     # original application's update feed, which is not this fork's update feed.
-    dotnet publish src/NexusMods.App/NexusMods.App.csproj --configuration Release --runtime win-x64 --self-contained true --output $outputPath -p:PublishSingleFile=false -p:PublishTrimmed=false -p:PublishReadyToRun=false -p:CreateHardLinksForCopyLocalIfPossible=true
+    # Runtime-specific restore can expose dependencies absent from the portable
+    # solution graph. Do not upload a preview with reported dependency advisories.
+    dotnet publish src/NexusMods.App/NexusMods.App.csproj --configuration Release --runtime win-x64 --self-contained true --output $outputPath -p:PublishSingleFile=false -p:PublishTrimmed=false -p:PublishReadyToRun=false -p:CreateHardLinksForCopyLocalIfPossible=true '-warnaserror:NU1901,NU1902,NU1903,NU1904'
     if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed.' }
 
     # These inherited installer helpers can revert managed games or terminate

@@ -72,7 +72,14 @@ remain user overrides.
 - Pin patched transitive packages used by inherited test helpers. Update the
   test-only native PNG decoder while retaining the existing Verify licenses.
   Image comparisons retain the existing PNG snapshots and Fuzz tolerance.
+- Require System.Private.Uri 4.3.2 in the common SDK dependency graph. The
+  Windows runtime-specific restore otherwise introduces the old 4.3.0 package
+  through legacy System.Runtime dependencies. Its compatibility reference has
+  no runtime assembly for this target; the app uses the .NET 9 runtime's URI
+  implementation. This pin fixes the dependency graph's advisory findings.
 - Audit transitive dependencies during restore. Audit warnings are not suppressed.
+  Windows preview publication treats reported vulnerability warnings as errors,
+  including those found only during its runtime-specific restore.
 - Keep package dependency hardlinks for build disk usage, while leaving compiled
   project outputs separate from their intermediate files so post-processors
   cannot rewrite a shared intermediate assembly through an output hardlink.
@@ -84,7 +91,8 @@ Relevant published advisories:
 [ASN.1](https://github.com/dotnet/runtime/security/advisories/GHSA-447r-wph3-92pm),
 [HTTP](https://github.com/advisories/GHSA-7jgj-8wvc-jh57),
 [JSON](https://github.com/advisories/GHSA-8g4q-xg66-9fp4),
-and [regular expressions](https://github.com/advisories/GHSA-cmhx-cq75-c4mj).
+[regular expressions](https://github.com/advisories/GHSA-cmhx-cq75-c4mj),
+and [URI handling](https://github.com/dotnet/announcements/issues/113).
 
 ## Windows check and remaining evidence
 
