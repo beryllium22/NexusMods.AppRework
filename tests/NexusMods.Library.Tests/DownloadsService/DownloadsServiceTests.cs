@@ -1,236 +1,156 @@
-using System.Reactive.Disposables;
+using System.Reactive.Linq;
+using System.Reactive.Threading.Tasks;
 using DynamicData;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using NexusMods.Abstractions.Downloads;
+using NexusMods.Abstractions.NexusModsLibrary;
 using NexusMods.Library.Tests.DownloadsService.Helpers;
+using NexusMods.MnemonicDB.Abstractions;
+using NexusMods.Paths;
 using NexusMods.Sdk.Jobs;
 using NexusMods.Sdk.NexusModsApi;
 using Xunit;
-using SyncHelpers = NexusMods.Library.Tests.DownloadsService.Helpers.SynchronizationHelpers;
 
 namespace NexusMods.Library.Tests.DownloadsService;
 
 public class DownloadsServiceTests(
     IJobMonitor jobMonitor,
-    Library.DownloadsService service,
     IServiceProvider serviceProvider)
 {
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(30);
     private readonly DownloadJobFactory _jobFactory = new(jobMonitor, serviceProvider);
 
-    // Helper methods
-    private CompositeDisposable SetupCollectionSubscriptions(
-        out List<DownloadInfo> allDownloads,
-        out List<DownloadInfo> completedDownloads,
-        out List<DownloadInfo> activeDownloads,
-        out List<DownloadInfo>? gameDownloads,
-        NexusModsGameId? gameId = null)
+    // A job's result is published before JobMonitor removes it. Observe removal
+    // explicitly so assertions run after DownloadsService has processed that event.
+    private IDisposable ObserveRemoval(JobId jobId, out Task removed)
     {
-        var disposables = new CompositeDisposable();
-        
-        // Create local lists first
-        var localAllDownloads = new List<DownloadInfo>();
-        var localCompletedDownloads = new List<DownloadInfo>();
-        var localActiveDownloads = new List<DownloadInfo>();
-        var localGameDownloads = gameId.HasValue ? new List<DownloadInfo>() : null;
-        
-        service.AllDownloads.Subscribe(changes => 
-        {
-            foreach (var change in changes)
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        removed = completion.Task;
+        return jobMonitor.GetObservableChangeSet<INexusModsDownloadJob>()
+            .Subscribe(changes =>
             {
-                switch (change.Reason)
-                {
-                    case ChangeReason.Add:
-                    case ChangeReason.Update:
-                        localAllDownloads.Add(change.Current);
-                        break;
-                    case ChangeReason.Remove:
-                        localAllDownloads.RemoveAll(d => d.Id == change.Key);
-                        break;
-                }
-            }
-        }).DisposeWith(disposables);
-        
-        service.CompletedDownloads.Subscribe(changes => 
-        {
-            foreach (var change in changes)
-            {
-                switch (change.Reason)
-                {
-                    case ChangeReason.Add:
-                    case ChangeReason.Update:
-                        localCompletedDownloads.Add(change.Current);
-                        break;
-                    case ChangeReason.Remove:
-                        localCompletedDownloads.RemoveAll(d => d.Id == change.Key);
-                        break;
-                }
-            }
-        }).DisposeWith(disposables);
-        
-        service.ActiveDownloads.Subscribe(changes => 
-        {
-            foreach (var change in changes)
-            {
-                switch (change.Reason)
-                {
-                    case ChangeReason.Add:
-                    case ChangeReason.Update:
-                        localActiveDownloads.Add(change.Current);
-                        break;
-                    case ChangeReason.Remove:
-                        localActiveDownloads.RemoveAll(d => d.Id == change.Key);
-                        break;
-                }
-            }
-        }).DisposeWith(disposables);
-        
-        if (gameId.HasValue && localGameDownloads != null)
-        {
-            service.GetDownloadsForGame(gameId.Value).Subscribe(changes => 
-            {
-                foreach (var change in changes)
-                {
-                    switch (change.Reason)
-                    {
-                        case ChangeReason.Add:
-                        case ChangeReason.Update:
-                            localGameDownloads.Add(change.Current);
-                            break;
-                        case ChangeReason.Remove:
-                            localGameDownloads.RemoveAll(d => d.Id == change.Key);
-                            break;
-                    }
-                }
-            }).DisposeWith(disposables);
-        }
-        
-        // Assign to out parameters
-        allDownloads = localAllDownloads;
-        completedDownloads = localCompletedDownloads;
-        activeDownloads = localActiveDownloads;
-        gameDownloads = localGameDownloads;
-        
-        return disposables;
+                if (changes.Any(change => change.Reason == ChangeReason.Remove && change.Key == jobId))
+                    completion.TrySetResult();
+            });
     }
-    
-    private CompositeDisposable SetupCollectionSubscriptions(
-        out List<DownloadInfo> allDownloads,
-        out List<DownloadInfo> completedDownloads,
-        out List<DownloadInfo> activeDownloads)
-    {
-        return SetupCollectionSubscriptions(out allDownloads, out completedDownloads, out activeDownloads, out _);
-    }
-    
+
+    private Library.DownloadsService CreateService() =>
+        new(jobMonitor, serviceProvider.GetRequiredService<IConnection>());
+
+    private static Task WaitForActiveDownload(IObservableCache<DownloadInfo, DownloadId> downloads) => downloads.CountChanged
+        .FirstAsync(count => count == 1)
+        .ToTask()
+        .WaitAsync(TestTimeout);
+
     [Fact]
     public async Task Validate_Download_Jobs_Lifetime()
     {
-        // Arrange
+        using var service = CreateService();
         var gameId = NexusModsGameId.From(1234u);
-        
-        // Subscribe to collections - SourceCache publishes immediately on subscribe
-        using var disposables = SetupCollectionSubscriptions(
-            out var allDownloads,
-            out var completedDownloads,
-            out var activeDownloads,
-            out var gameDownloads,
-            gameId);
+        using var allDownloads = service.AllDownloads.AsObservableCache();
+        using var completedDownloads = service.CompletedDownloads.AsObservableCache();
+        using var activeDownloads = service.ActiveDownloads.AsObservableCache();
+        using var gameDownloads = service.GetDownloadsForGame(gameId).AsObservableCache();
 
-        // 1. No jobs initially
-        allDownloads.Should().BeEmpty("no jobs should exist initially");
-        completedDownloads.Should().BeEmpty("no completed jobs should exist initially");
-        activeDownloads.Should().BeEmpty("no active jobs should exist initially");
-        gameDownloads!.Should().BeEmpty("no game-specific jobs should exist initially");
-        
-        // 2. Start job with signals for proper synchronization
+        allDownloads.Count.Should().Be(0);
+        completedDownloads.Count.Should().Be(0);
+        activeDownloads.Count.Should().Be(0);
+        gameDownloads.Count.Should().Be(0);
+
         var context = _jobFactory.CreateAndStartDownloadJob(gameId);
-        
-        // Wait for jobs to signal they're ready before checking state
-        context.WaitForJobsReady(TimeSpan.FromSeconds(30))
-            .Should().BeTrue("jobs should signal ready within timeout");
-        
-        // Signal jobs to start and wait for collections to be updated
+        using var removalSubscription = ObserveRemoval(context.JobTask.Job.Id, out var removed);
         context.SignalJobsToStart();
-        
-        // Wait for job to appear in collections with proper timeout
-        (await SyncHelpers.WaitForCollectionCount(allDownloads, 1, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("job should be in AllDownloads when started");
-        (await SyncHelpers.WaitForCollectionCount(gameDownloads!, 1, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("job should be in game-specific downloads when started");
-        (await SyncHelpers.WaitForCollectionCount(activeDownloads, 1, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("job should be in ActiveDownloads when started");
-        completedDownloads.Should().BeEmpty("job should not be in CompletedDownloads when started");
-        
-        // 3. Complete job - should move to CompletedDownloads only
-        context.CompleteJob();
-        await context.JobTask.Job.WaitAsync();
-        
-        // Wait for completion to be processed by collections
-        (await SyncHelpers.WaitForCollectionCount(completedDownloads, 1, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("completed job should be in CompletedDownloads");
-        (await SyncHelpers.WaitForCollectionCount(activeDownloads, 0, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("completed job should not be in ActiveDownloads");
-        
-        // Verify final state
-        allDownloads.Should().HaveCount(1, "completed job should remain in AllDownloads");
-        completedDownloads.Should().HaveCount(1, "completed job should be in CompletedDownloads");
-        activeDownloads.Should().BeEmpty("completed job should not be in ActiveDownloads");
-        gameDownloads.Should().HaveCount(1, "completed job should remain in game-specific downloads");
+        await WaitForActiveDownload(activeDownloads);
+
+        allDownloads.Count.Should().Be(1);
+        gameDownloads.Count.Should().Be(1);
+        activeDownloads.Count.Should().Be(1);
+        completedDownloads.Count.Should().Be(0);
+
+        await context.CompleteJobAsync().WaitAsync(TestTimeout);
+        await context.JobTask.Job.WaitAsync().WaitAsync(TestTimeout);
+        await removed.WaitAsync(TestTimeout);
+
+        allDownloads.Count.Should().Be(1, "completed downloads remain in the library view");
+        completedDownloads.Count.Should().Be(1);
+        activeDownloads.Count.Should().Be(0);
+        gameDownloads.Count.Should().Be(1);
+        var download = completedDownloads.Items.Single();
+        download.Status.Value.Should().Be(JobStatus.Completed);
+        download.Progress.Value.Should().Be(Percent.One);
+        download.TransferRate.Value.Should().Be(Size.Zero);
+        download.CompletedAt.Value.HasValue.Should().BeTrue();
     }
-    
+
+    [Fact]
+    public async Task CompletedParent_FinalizesDownloadBeforeChildNotification()
+    {
+        using var service = CreateService();
+        using var allDownloads = service.AllDownloads.AsObservableCache();
+        using var completedDownloads = service.CompletedDownloads.AsObservableCache();
+        using var activeDownloads = service.ActiveDownloads.AsObservableCache();
+        var context = _jobFactory.CreateAndStartDownloadJob(NexusModsGameId.From(1234u));
+        using var removalSubscription = ObserveRemoval(context.JobTask.Job.Id, out var removed);
+        context.SignalJobsToStart();
+        await WaitForActiveDownload(activeDownloads);
+
+        try
+        {
+            // Deliberately invert the normal dependency: hold the HTTP job open
+            // until the parent has been removed and the cache has finalized it.
+            context.CompletionSource.TrySetResult(context.NexusJob.Destination);
+            await removed.WaitAsync(TestTimeout);
+            context.HttpJobTask.Job.WaitAsync().IsCompleted.Should().BeFalse();
+
+            var download = allDownloads.Items.Single();
+            download.Status.Value.Should().Be(JobStatus.Completed);
+            download.Progress.Value.Should().Be(Percent.One);
+            download.TransferRate.Value.Should().Be(Size.Zero);
+            download.CompletedAt.Value.HasValue.Should().BeTrue();
+            completedDownloads.Count.Should().Be(1);
+            activeDownloads.Count.Should().Be(0);
+        }
+        finally
+        {
+            context.HttpCompletionSource.TrySetResult(context.HttpJob.Destination);
+            await context.HttpJobTask.Job.WaitAsync().WaitAsync(TestTimeout);
+        }
+
+        allDownloads.Count.Should().Be(1);
+        completedDownloads.Count.Should().Be(1, "a late child completion must not lose the retained download");
+        activeDownloads.Count.Should().Be(0);
+    }
+
     [Fact]
     public async Task CancelledJobs_ShouldBeCompletelyRemoved_FromAllCollections()
     {
-        // Arrange
-        var gameId = NexusModsGameId.From(1234u);
-        
-        using var disposables = SetupCollectionSubscriptions(
-            out var allDownloads,
-            out var completedDownloads,
-            out var activeDownloads);
-        
-        // Initially empty
-        allDownloads.Should().BeEmpty("no jobs should exist initially");
-        
-        // Create and start job
-        var context = _jobFactory.CreateAndStartDownloadJob(gameId);
-        
-        // Wait for jobs to signal they're ready before checking state
-        context.WaitForJobsReady(TimeSpan.FromSeconds(30))
-            .Should().BeTrue("jobs should signal ready within timeout");
-        
-        // Job should appear in collections
-        allDownloads.Should().HaveCount(1, "job should be in AllDownloads when started");
-        activeDownloads.Should().HaveCount(1, "job should be in ActiveDownloads when started");
-        
-        // Start a pre-Cancelled the job
+        using var service = CreateService();
+        using var allDownloads = service.AllDownloads.AsObservableCache();
+        using var completedDownloads = service.CompletedDownloads.AsObservableCache();
+        using var activeDownloads = service.ActiveDownloads.AsObservableCache();
+
+        var context = _jobFactory.CreateAndStartDownloadJob(NexusModsGameId.From(1234u));
+        using var removalSubscription = ObserveRemoval(context.JobTask.Job.Id, out var removed);
+        await WaitForActiveDownload(activeDownloads);
+        allDownloads.Count.Should().Be(1);
+        activeDownloads.Count.Should().Be(1);
+
         context.CancelJob();
         context.SignalJobsToStart();
-        
-        try
-        {
-            await context.JobTask.Job.WaitAsync();
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected
-        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => context.JobTask.Job.WaitAsync().WaitAsync(TestTimeout));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => context.HttpJobTask.Job.WaitAsync().WaitAsync(TestTimeout));
+        await removed.WaitAsync(TestTimeout);
 
-        // Cancelled jobs should be completely removed
-        // Note: The change isn't instant so we must wait for the collections to update
-        (await SyncHelpers.WaitForCollectionCount(allDownloads, 0, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("cancelled jobs should be removed from AllDownloads");
-        (await SyncHelpers.WaitForCollectionCount(completedDownloads, 0, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("cancelled jobs should not be in CompletedDownloads");
-        (await SyncHelpers.WaitForCollectionCount(activeDownloads, 0, TimeSpan.FromSeconds(30)))
-            .Should().BeTrue("cancelled jobs should not be in ActiveDownloads");
+        allDownloads.Count.Should().Be(0);
+        completedDownloads.Count.Should().Be(0, "cancellation must never be reported as successful completion");
+        activeDownloads.Count.Should().Be(0);
     }
 
-    // Nested Startup class for Xunit.DependencyInjection
     public class Startup
     {
-        // https://github.com/pengweiqhca/Xunit.DependencyInjection?tab=readme-ov-file#3-closest-startup
-        // A trick for parallelizing tests with Xunit.DependencyInjection
         public void ConfigureServices(IServiceCollection services) => DIHelpers.ConfigureServices(services);
     }
 }
