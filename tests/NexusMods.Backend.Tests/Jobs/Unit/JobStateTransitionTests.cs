@@ -77,14 +77,16 @@ public class JobStateTransitionTests : AJobsTest
         await Assert.ThrowsAsync<InvalidOperationException>(() => task.Job.WaitAsync());
 
         await Assert.That(task.Job.Status).IsEqualTo(JobStatus.Failed);
-        await Assert.That(stateChanges).IsEquivalentTo([JobStatus.Created, JobStatus.Running, JobStatus.Failed]);
+        // Begin may reach Running before subscription, so Created is not guaranteed to be observed.
+        await Assert.That(stateChanges).Contains(JobStatus.Running);
+        await Assert.That(stateChanges).Contains(JobStatus.Failed);
     }
 
     [Test]
     public async Task Should_Transition_From_Running_To_Cancelled()
     {
         // Arrange
-        var readySignal = new ManualResetEventSlim();
+        using var readySignal = new ManualResetEventSlim();
         var job = new WaitForCancellationJob(readySignal);
         var stateChanges = new List<JobStatus>();
         
@@ -92,14 +94,14 @@ public class JobStateTransitionTests : AJobsTest
         var task = JobMonitor.Begin<WaitForCancellationJob, string>(job);
         
         // Wait for job to be ready, then cancel
-        readySignal.Wait(TimeSpan.FromSeconds(30));
+        await Assert.That(readySignal.Wait(TimeSpan.FromSeconds(30))).IsTrue();
         
         // Note(sewer): The job is running by definition, since readySignal was signaled on job's end.
         using var subscription = task.Job.ObservableStatus.Subscribe(status => stateChanges.Add(status));
         JobMonitor.Cancel(task.Job.Id);
         
         // Assert
-        await Assert.ThrowsAsync<OperationCanceledException>(() => task.Job.WaitAsync());
+        await Assert.ThrowsAsync<OperationCanceledException>(() => task.Job.WaitAsync().WaitAsync(TimeSpan.FromSeconds(30)));
 
         await Assert.That(task.Job.Status).IsEqualTo(JobStatus.Cancelled);
         await Assert.That(stateChanges).IsEquivalentTo([JobStatus.Running, JobStatus.Cancelled]);

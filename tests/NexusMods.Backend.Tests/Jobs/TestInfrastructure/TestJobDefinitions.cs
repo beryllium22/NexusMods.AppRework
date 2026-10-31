@@ -72,13 +72,11 @@ public record WaitForCancellationJob(ManualResetEventSlim ReadySignal) : IJobDef
 {
     public async ValueTask<string> StartAsync(IJobContext<WaitForCancellationJob> context)
     {
+        // Register the cancellation-aware wait before announcing that the job is ready.
+        // Polling the token here could exit the loop and return success when cancelled.
+        var waitForCancellation = Task.Delay(Timeout.InfiniteTimeSpan, context.CancellationToken);
         ReadySignal.Set();
-        
-        while (!context.CancellationToken.IsCancellationRequested)
-        {
-            await Task.Delay(10, CancellationToken.None);
-            await context.YieldAsync();
-        }
+        await waitForCancellation;
 
         return "Should not reach here";
     }

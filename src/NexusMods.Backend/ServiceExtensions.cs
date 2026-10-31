@@ -1,3 +1,4 @@
+using GameFinder.RegistryUtils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -28,11 +29,15 @@ public static class ServiceExtensions
 {
     public static IServiceCollection AddGameLocators(
         this IServiceCollection serviceCollection,
-        GameLocatorSettings? settings = null)
+        GameLocatorSettings? settings = null,
+        IOSInformation? os = null)
     {
-        OSInformation.Shared.SwitchPlatform(
+        os ??= OSInformation.Shared;
+        os.SwitchPlatform(
             onWindows: () =>
             {
+                // Preserve a caller-supplied registry, including isolated discovery tests.
+                serviceCollection.TryAddSingleton<IRegistry>(_ => OperatingSystem.IsWindows() ? WindowsRegistry.Shared : new InMemoryRegistry());
                 serviceCollection.AddSingleton<IGameLocator, SteamLocator>();
                 serviceCollection.AddSingleton<IGameLocator, GOGLocator>();
                 serviceCollection.AddSingleton<IGameLocator, EGSLocator>();
@@ -58,7 +63,7 @@ public static class ServiceExtensions
             },
             onOSX: () =>
             {
-                serviceCollection.AddSingleton<IGameLocator, SteamLocator>();
+                serviceCollection.AddSingleton<IGameLocator>(serviceProvider => new SteamLocator(serviceProvider.GetServices<IGameData>(), serviceProvider.GetRequiredService<ILoggerFactory>(), serviceProvider.GetRequiredService<IFileSystem>(), registry: null));
             }
         );
 

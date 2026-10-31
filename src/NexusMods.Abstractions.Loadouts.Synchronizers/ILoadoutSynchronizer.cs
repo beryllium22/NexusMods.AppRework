@@ -44,6 +44,12 @@ public interface ILoadoutSynchronizer
     Task<Loadout.ReadOnly> Synchronize(Loadout.ReadOnly loadout, SynchronizeLoadoutJob? job = null);
 
     /// <summary>
+    /// Reconciles the loadout and game files without running game-specific deployment tools.
+    /// Used when deactivating a loadout so external changes are preserved even if deployment failed.
+    /// </summary>
+    Task<Loadout.ReadOnly> SynchronizeFiles(Loadout.ReadOnly loadout, SynchronizeLoadoutJob? job = null);
+
+    /// <summary>
     /// Get the disk state for a game as of a specific transaction.
     /// </summary>
     /// <param name="metadata"></param>
@@ -101,6 +107,11 @@ public interface ILoadoutSynchronizer
     public List<PathPartPair> GetDiskStateForGame(Sdk.Games.GameInstallMetadata.ReadOnly metadata);
 
     public bool ShouldSynchronize(Loadout.ReadOnly loadout, IEnumerable<PathPartPair> previousState, IEnumerable<PathPartPair> lastScannedState);
+
+    /// <summary>
+    /// Whether game-specific deployment still needs to complete, even when the copied files match.
+    /// </summary>
+    bool HasPendingDeployment(Loadout.ReadOnly loadout) => false;
     
     /// <summary>
     /// Computes the difference between a loadout and a disk state, assuming the loadout to be the newer state.

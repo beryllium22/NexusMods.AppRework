@@ -15,6 +15,8 @@ public class DialogStandardContentDesignViewModel : AViewModel<IDialogStandardCo
     public IMarkdownRendererViewModel? MarkdownRenderer { get; }
     public bool ShowMarkdownCopyButton { get; } = true;
     [Reactive] public string InputText { get; set; } = "Sample input text";
+    public string InputValidationError => string.Empty;
+    public bool IsInputValid => true;
     public string InputLabel { get; set; } = "Sample Input Label";
     public string InputWatermark { get; set; } = "Enter text here...";
     public string BottomText { get; } = "Sample bottom text";

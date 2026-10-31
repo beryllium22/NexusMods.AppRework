@@ -12,6 +12,8 @@
         <PackageReference Include="Avalonia.Headless" />
         <PackageReference Include="Verify.Xunit" />
         <PackageReference Include="Verify.ImageMagick"/>
+        <!-- Keep patched native decoders with the MIT-licensed PNG comparer. -->
+        <PackageReference Include="Magick.NET-Q16-AnyCPU" />
     </ItemGroup>
 
     <ItemGroup>

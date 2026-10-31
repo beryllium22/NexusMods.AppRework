@@ -5,6 +5,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NexusMods.MnemonicDB.Abstractions;
+using NexusMods.Paths;
 using NexusMods.Sdk.Games;
 using NexusMods.Sdk.Loadouts;
 
@@ -90,17 +91,34 @@ internal class GameRegistry : IGameRegistry
 
     public bool TryGetGameInstallation(Loadout.ReadOnly loadout, [NotNullWhen(true)] out GameInstallation? gameInstallation)
     {
+        gameInstallation = null;
+        if (!loadout.IsValid()) return false;
+
         var metadata = loadout.Installation;
-        foreach (var installation in LocateGameInstallations())
+        if (!metadata.IsValid()) return false;
+
+        var candidates = LocateGameInstallations()
+            .Where(installation => installation.Game.NexusModsGameId == metadata.GameId && installation.LocatorResult.Store == metadata.Store)
+            .DistinctBy(InstallationPath)
+            .ToArray();
+
+        foreach (var installation in candidates)
         {
-            if (installation.Game.NexusModsGameId != metadata.GameId) continue;
-            if (installation.LocatorResult.Store != metadata.Store) continue;
+            if (!MatchesPath(metadata.Path, InstallationPath(installation))) continue;
 
             gameInstallation = installation;
             return true;
         }
 
-        gameInstallation = null;
+        // Preserve relocation only when neither discovered copies nor saved metadata can
+        // refer to a different installation. An orphan must not silently attach to one.
+        if (candidates.Length == 1 && GameInstallMetadata.FindByGameId(_connection.Db, metadata.GameId)
+                .Count(candidate => candidate.IsValid() && candidate.Store == metadata.Store) == 1)
+        {
+            gameInstallation = candidates[0];
+            return true;
+        }
+
         return false;
     }
 
@@ -114,15 +132,39 @@ internal class GameRegistry : IGameRegistry
             return false;
         }
 
-        var allMetadata = GameInstallMetadata.FindByGameId(_connection.Db, gameId.Value);
+        var allMetadata = GameInstallMetadata.FindByGameId(_connection.Db, gameId.Value)
+            .Where(metadata => metadata.IsValid() && metadata.Store == installation.LocatorResult.Store)
+            .ToArray();
+        var path = InstallationPath(installation);
         foreach (var metadata in allMetadata)
         {
-            if (metadata.Store != installation.LocatorResult.Store) continue;
+            if (!MatchesPath(metadata.Path, path)) continue;
             result = metadata;
             return true;
+        }
+
+        // A new second copy needs its own metadata even when only the first copy has
+        // been managed. Relocation is safe only if discovery now finds this copy alone.
+        if (allMetadata.Length == 1)
+        {
+            var candidates = LocateGameInstallations()
+                .Where(candidate => candidate.Game.NexusModsGameId == gameId && candidate.LocatorResult.Store == installation.LocatorResult.Store)
+                .DistinctBy(InstallationPath)
+                .ToArray();
+            if (candidates.Length == 1 && InstallationPath(candidates[0]) == path)
+            {
+                result = allMetadata[0];
+                return true;
+            }
         }
 
         result = default(GameInstallMetadata.ReadOnly);
         return false;
     }
+
+    private static AbsolutePath InstallationPath(GameInstallation installation)
+        => installation.Locations[LocationId.Game].Path;
+
+    private static bool MatchesPath(string savedPath, AbsolutePath path)
+        => path.FileSystem.FromUnsanitizedFullPath(savedPath) == path;
 }

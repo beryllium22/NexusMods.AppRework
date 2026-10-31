@@ -47,6 +47,10 @@ public class Sorter : ISorter
         where TId : IEquatable<TId>
         where TCollection : class, IReadOnlyList<TItem>
     {
+        // Collections can legitimately contain no installed items (for example,
+        // when all downloads are optional). Partitioner rejects an empty range.
+        if (items.Count == 0) return Array.Empty<TItem>();
+
         var partitioner = Partitioner.Create(0, items.Count);
         var indexed = new ConcurrentDictionary<TId, (TId[] After, TItem Item)>(Environment.ProcessorCount, items.Count);
 

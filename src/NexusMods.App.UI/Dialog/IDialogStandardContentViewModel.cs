@@ -12,6 +12,8 @@ public interface IDialogStandardContentViewModel : IViewModelInterface
     IMarkdownRendererViewModel? MarkdownRenderer { get; }
     bool ShowMarkdownCopyButton { get; }
     string InputText { get; set; }
+    string InputValidationError { get; }
+    bool IsInputValid { get; }
     string InputLabel { get; set; }
     string InputWatermark { get; set; }
     string BottomText { get; }

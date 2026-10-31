@@ -23,6 +23,7 @@ internal class InstallLoadoutItemJob : IJobDefinitionWithStart<InstallLoadoutIte
     public ILibraryItemInstaller? FallbackInstaller { get; init; }
     public LibraryItem.ReadOnly LibraryItem { get; init; }
     public Optional<LoadoutItemGroupId> ParentGroupId { get; set; }
+    public bool UseDefaultCollection { get; init; } = true;
     public LoadoutId LoadoutId { get; init; }
     
     public required ITransaction Transaction { get; init; }
@@ -42,7 +43,8 @@ internal class InstallLoadoutItemJob : IJobDefinitionWithStart<InstallLoadoutIte
         ITransaction transaction,
         Optional<LoadoutItemGroupId> groupId = default,
         ILibraryItemInstaller? installer = null,
-        ILibraryItemInstaller? fallbackInstaller = null)
+        ILibraryItemInstaller? fallbackInstaller = null,
+        bool useDefaultCollection = true)
     {
         var connection = serviceProvider.GetRequiredService<IConnection>();
         var job = new InstallLoadoutItemJob
@@ -53,6 +55,7 @@ internal class InstallLoadoutItemJob : IJobDefinitionWithStart<InstallLoadoutIte
             LibraryItem = libraryItem,
             LoadoutId = targetLoadout,
             ParentGroupId = groupId,
+            UseDefaultCollection = useDefaultCollection,
             Connection = connection,
             ServiceProvider = serviceProvider,
             Transaction = transaction,
@@ -63,7 +66,7 @@ internal class InstallLoadoutItemJob : IJobDefinitionWithStart<InstallLoadoutIte
 
     public async ValueTask<InstallLoadoutItemJobResult> StartAsync(IJobContext<InstallLoadoutItemJob> context)
     {
-        if (!ParentGroupId.HasValue)
+        if (!ParentGroupId.HasValue && UseDefaultCollection)
         {
             var collection = Loadout.Load(Connection.Db, LoadoutId).MutableCollections().First().CollectionId;
             ParentGroupId = LoadoutItemGroupId.From(collection);
@@ -128,15 +131,19 @@ internal class InstallLoadoutItemJob : IJobDefinitionWithStart<InstallLoadoutIte
 
             using var subTransaction = context.Definition.Transaction.CreateSubTransaction();
             
-            var loadoutGroup = new LoadoutItemGroup.New(subTransaction, out var groupId)
+            var groupId = subTransaction.TempId();
+            var loadoutItem = new LoadoutItem.New(subTransaction, groupId)
+            {
+                Name = LibraryItem.Name,
+                LoadoutId = LoadoutId,
+            };
+            if (ParentGroupId.HasValue)
+                loadoutItem.ParentId = ParentGroupId.Value;
+
+            var loadoutGroup = new LoadoutItemGroup.New(subTransaction, groupId)
             {
                 IsGroup = true,
-                LoadoutItem = new LoadoutItem.New(subTransaction, groupId)
-                {
-                    Name = LibraryItem.Name,
-                    LoadoutId = LoadoutId,
-                    ParentId = ParentGroupId.Value,
-                },
+                LoadoutItem = loadoutItem,
             };
 
             // TODO(erri120): add safeguards to only allow groups to be added to the parent groups

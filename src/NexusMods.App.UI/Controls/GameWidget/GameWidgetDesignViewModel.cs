@@ -14,6 +14,7 @@ public class GameWidgetDesignViewModel : AViewModel<IGameWidgetViewModel>, IGame
 {
     [Reactive] public GameInstallation? Installation { get; set; } = null!;
     public string Name { get; } = "Cyberpunk 2077";
+    public bool IsExperimental { get; set; }
     public string Version { get; set; }
     public string Store { get; set; }
     public IconValue GameStoreIcon { get; set; }

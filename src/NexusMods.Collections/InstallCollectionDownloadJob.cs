@@ -69,6 +69,8 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
         var nexusModsLibrary = serviceProvider.GetRequiredService<NexusModsLibrary>();
 
         var root = await nexusModsLibrary.ParseCollectionJsonFile(sourceCollection, cancellationToken);
+        if (download.ArrayIndex < 0 || download.ArrayIndex >= root.Mods.Length)
+            throw new InvalidDataException($"Collection item '{download.Name}' refers to missing manifest entry {download.ArrayIndex}.");
         var collectionMod = root.Mods[download.ArrayIndex];
 
         return new InstallCollectionDownloadJob
@@ -91,8 +93,11 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
     /// <inheritdoc/>
     public async ValueTask<LoadoutItemGroup.ReadOnly> StartAsync(IJobContext<InstallCollectionDownloadJob> context)
     {
+        context.CancellationToken.ThrowIfCancellationRequested();
         var (group, patchedFiles) = await Install(context);
 
+        // The group has already committed. Finish its collection metadata even if cancellation
+        // arrived at that boundary, so a retry recognizes a complete child installation.
         using var tx = Connection.BeginTransaction();
 
         // Patch files
@@ -121,7 +126,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
     {
         if (Item.TryGetAsCollectionDownloadBundled(out var bundledDownload))
         {
-            return (await InstallBundledMod(bundledDownload), []);
+            return (await InstallBundledMod(bundledDownload, context.CancellationToken), []);
         }
 
         PatchedFile[] patchedFiles = [];
@@ -135,7 +140,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
 
         if (CollectionMod.Hashes.Length > 0)
         {
-            return (await InstallReplicatedMod(patchedFiles), []);
+            return (await InstallReplicatedMod(patchedFiles, context.CancellationToken), []);
         }
 
         if (CollectionMod.Choices is { Type: ChoicesType.fomod })
@@ -143,7 +148,8 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
             return (await InstallFomodWithPredefinedChoices(context.CancellationToken), patchedFiles);
         }
 
-        var result = await LoadoutManager.InstallItem(
+        context.CancellationToken.ThrowIfCancellationRequested();
+        var installJob = LoadoutManager.InstallItem(
             libraryFile.AsLibraryItem(),
             TargetLoadout,
             parent: Group.AsLoadoutItemGroup().LoadoutItemGroupId,
@@ -154,15 +160,20 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
             fallbackInstaller: FallbackInstaller
         );
 
-        Debug.Assert(result.LoadoutItemGroup.HasValue);
-        return (result.LoadoutItemGroup!.Value, patchedFiles);
+        using var registration = context.CancellationToken.Register(() => installJob.Job.AsContext().Cancel());
+        var result = await installJob;
+        if (!result.LoadoutItemGroup.HasValue)
+            throw new InvalidOperationException($"Collection item '{Item.Name}' did not produce an installed mod group.");
+        return (result.LoadoutItemGroup.Value, patchedFiles);
     }
 
-    private Task<LoadoutItemGroup.ReadOnly> InstallBundledMod(CollectionDownloadBundled.ReadOnly download) => LoadoutManager.InstallItemWrapper(TargetLoadout, tx =>
+    private Task<LoadoutItemGroup.ReadOnly> InstallBundledMod(CollectionDownloadBundled.ReadOnly download, CancellationToken cancellationToken) => LoadoutManager.InstallItemWrapper(TargetLoadout, tx =>
     {
         // Bundled mods are found inside the collection archive, so we'll have to find the files that are prefixed with the mod's source file expression.
         var prefixPath = RelativePath.FromUnsanitizedInput("bundled").Join(download.BundledPath);
         var prefixFiles = SourceCollectionArchive.Children.Where(f => f.Path.InFolder(prefixPath)).ToArray();
+        if (prefixFiles.Length == 0)
+            throw new InvalidDataException($"The collection archive has no bundled files for '{download.AsCollectionDownload().Name}' at '{prefixPath}'.");
 
         var modGroup = new NexusCollectionBundledLoadoutGroup.New(tx, out var id)
         {
@@ -190,6 +201,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
 
         foreach (var file in prefixFiles)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Remove the prefix path from the file path
             var fixedPath = file.Path.RelativeTo(prefixPath);
 
@@ -200,7 +212,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
                 Size = file.AsLibraryFile().Size,
                 LoadoutItemWithTargetPath = new LoadoutItemWithTargetPath.New(tx, fileId)
                 {
-                    TargetPath = (fileId, parentPath.LocationId, parentPath.Path.Join(fixedPath)),
+                    TargetPath = (TargetLoadout, parentPath.LocationId, parentPath.Path.Join(fixedPath)),
                     LoadoutItem = new LoadoutItem.New(tx, fileId)
                     {
                         Name = file.Path,
@@ -211,6 +223,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
             };
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(LoadoutItemGroupId.From(id.Value));
     });
 
@@ -219,7 +232,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
     /// the game may set custom target folders or other settings. So we'll have to get the game instance
     /// and find the installer that matches the type 
     /// </summary>
-    private FomodXmlInstaller GetFomodXmlInstaller(CancellationToken cancellationToken)
+    private FomodXmlInstaller GetFomodXmlInstaller()
     {
         var loadout = Loadout.Load(Connection.Db, TargetLoadout);
         var game = loadout.InstallationInstance.GetGame();
@@ -236,7 +249,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
         var libraryFile = GetLibraryFile(Item, Connection.Db);
         if (!libraryFile.TryGetAsLibraryArchive(out var libraryArchive)) throw new NotSupportedException();
 
-        var fomodInstaller = GetFomodXmlInstaller(cancellationToken);
+        var fomodInstaller = GetFomodXmlInstaller();
 
         var loadoutItemGroup = new LoadoutItemGroup.New(tx, out var id)
         {
@@ -265,8 +278,12 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
         var loadout = new Loadout.ReadOnly(Connection.Db, TargetLoadout);
 
         var options = CollectionMod.Choices!.Options;
-        await fomodInstaller.ExecuteAsync(libraryArchive, loadoutItemGroup, tx, loadout, options, cancellationToken: cancellationToken);
+        var result = await fomodInstaller.ExecuteAsync(libraryArchive, loadoutItemGroup, tx, loadout, options,
+            cancellationToken: cancellationToken, installingCollection: Group.AsLoadoutItemGroup().LoadoutItemGroupId);
+        if (result.IsNotSupported(out var reason))
+            throw new InvalidDataException($"Collection item '{Item.Name}' requires a FOMOD installer, but {reason}");
 
+        cancellationToken.ThrowIfCancellationRequested();
         return loadoutItemGroup;
     });
 
@@ -276,27 +293,24 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
     /// situation. We don't store the MD5 hashes in the database, so we'll have to calculate them on the fly.
     /// </summary>
     /// <param name="patchedFiles"></param>
-    private Task<LoadoutItemGroup.ReadOnly> InstallReplicatedMod(PatchedFile[] patchedFiles) => LoadoutManager.InstallItemWrapper(TargetLoadout, async tx =>
+    private Task<LoadoutItemGroup.ReadOnly> InstallReplicatedMod(PatchedFile[] patchedFiles, CancellationToken cancellationToken) => LoadoutManager.InstallItemWrapper(TargetLoadout, async tx =>
     {
         // So collections hash everything by MD5, so we'll have to collect MD5 information for the files in the archive.
         // We don't do this during indexing into the library because this is the only case where we need MD5 hashes.
         ConcurrentDictionary<Md5Value, HashMapping> hashes = new();
 
         var libraryFile = GetLibraryFile(Item, Connection.Db);
-        if (!libraryFile.TryGetAsLibraryArchive(out var libraryArchive))
-            throw new NotImplementedException();
+        var sourceFiles = libraryFile.TryGetAsLibraryArchive(out var libraryArchive)
+            ? libraryArchive.Children.Select(child => child.AsLibraryFile()).ToArray()
+            : [libraryFile];
 
-        await Parallel.ForEachAsync(libraryArchive.Children, async (child, token) =>
+        await Parallel.ForEachAsync(sourceFiles, cancellationToken, async (file, token) =>
         {
-            await using var stream = await FileStore.GetFileStream(child.AsLibraryFile().Hash, token);
+            await using var stream = await FileStore.GetFileStream(file.Hash, token);
             var md5 = await Md5Hasher.HashAsync(stream, cancellationToken: token);
-
-            var file = child.AsLibraryFile();
-            hashes[md5] = new HashMapping()
-            {
-                Hash = file.Hash,
-                Size = file.Size,
-            };
+            var mapping = new HashMapping { Hash = file.Hash, Size = file.Size };
+            if (!hashes.TryAdd(md5, mapping) && (hashes[md5].Hash != mapping.Hash || hashes[md5].Size != mapping.Size))
+                throw new InvalidDataException($"Collection item '{Item.Name}' contains ambiguous files with MD5 '{md5}'.");
         });
 
         foreach (var patchedFile in patchedFiles)
@@ -342,12 +356,22 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
             LoadoutItemGroup = group.GetNexusCollectionItemLoadoutGroup(tx).GetLoadoutItemGroup(tx),
         };
 
-        // Now we map the files to their locations based on the hashes
+        // Validate all destinations inside this transaction. A conflicting or incomplete
+        // manifest must not leave a partially replicated group behind.
+        var destinations = new Dictionary<RelativePath, Md5Value>();
         foreach (var pair in CollectionMod.Hashes)
         {
-            // Try and find the hash we are looking for
+            cancellationToken.ThrowIfCancellationRequested();
+            ValidateDestination(pair.Path);
+            if (destinations.TryGetValue(pair.Path, out var previousHash))
+            {
+                if (previousHash != pair.MD5)
+                    throw new InvalidDataException($"Collection item '{Item.Name}' maps different files to '{pair.Path}'.");
+                continue;
+            }
+            destinations.Add(pair.Path, pair.MD5);
             if (!hashes.TryGetValue(pair.MD5, out var libraryItem))
-                throw new InvalidOperationException("The hash was not found in the archive.");
+                throw new InvalidDataException($"Collection item '{Item.Name}' is missing the file with MD5 '{pair.MD5}' required for '{pair.Path}'.");
 
             // Map the file to the specific path
             _ = new LoadoutFile.New(tx, out var fileId)
@@ -356,7 +380,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
                 Size = libraryItem.Size,
                 LoadoutItemWithTargetPath = new LoadoutItemWithTargetPath.New(tx, fileId)
                 {
-                    TargetPath = (fileId, LocationId.Game, pair.Path),
+                    TargetPath = (TargetLoadout, LocationId.Game, pair.Path),
                     LoadoutItem = new LoadoutItem.New(tx, fileId)
                     {
                         Name = pair.Path,
@@ -367,8 +391,17 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
             };
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return group.Id;
     });
+
+    private static void ValidateDestination(RelativePath path)
+    {
+        var value = path.ToString().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(value) || value.StartsWith('/') || value.Contains(':') ||
+            value.Split('/').Any(part => part is ".." or "." or ""))
+            throw new InvalidDataException($"The collection has an invalid installation destination '{path}'.");
+    }
 
     private async ValueTask<PatchedFile[]> PatchFiles(LibraryArchive.ReadOnly srcArchive, CancellationToken cancellationToken)
     {
@@ -378,33 +411,41 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
         var patches = CollectionMod.Patches.ToArray();
         var results = new ValueTuple<PatchedFile, MemoryStream>[patches.Length];
 
-        await Parallel.ForAsync(fromInclusive: 0, toExclusive: patches.Length, cancellationToken: cancellationToken, async (i, innerCancellationToken) =>
+        try
         {
-            var patch = patches[i];
-            var result = await PatchFile(patch.Key, patch.Value, srcFiles, collectionFiles, cancellationToken: innerCancellationToken);
-            results[i] = result;
-        });
-
-        var archivedFileEntries = results.Select(static tuple => new ArchivedFileEntry(
-            StreamFactory: new MemoryStreamFactory(name: tuple.Item1.FileName, stream: tuple.Item2),
-            Hash: tuple.Item1.PatchedFileHashes.XxHash3,
-            Size: tuple.Item1.PatchedFileHashes.Size
-        )).ToArray();
-
-        await FileStore.BackupFiles(archivedFileEntries, deduplicate: true, token: cancellationToken);
-
-        if (ApplicationConstants.IsDebug)
-        {
-            foreach (var result in results)
+            await Parallel.ForAsync(fromInclusive: 0, toExclusive: patches.Length, cancellationToken: cancellationToken, async (i, innerCancellationToken) =>
             {
-                var (patchedFile, _) = result;
-                var hash = patchedFile.PatchedFileHashes.XxHash3;
-                var hasFile = await FileStore.HaveFile(hash);
-                Debug.Assert(hasFile, "expected the file store to have the file it just backed up...");
-            }
-        }
+                var patch = patches[i];
+                var result = await PatchFile(patch.Key, patch.Value, srcFiles, collectionFiles, cancellationToken: innerCancellationToken);
+                results[i] = result;
+            });
 
-        return results.Select(static x => x.Item1).ToArray();
+            var archivedFileEntries = results.Select(static tuple => new ArchivedFileEntry(
+                StreamFactory: new MemoryStreamFactory(name: tuple.Item1.FileName, stream: tuple.Item2),
+                Hash: tuple.Item1.PatchedFileHashes.XxHash3,
+                Size: tuple.Item1.PatchedFileHashes.Size
+            )).ToArray();
+
+            await FileStore.BackupFiles(archivedFileEntries, deduplicate: true, token: cancellationToken);
+
+            if (ApplicationConstants.IsDebug)
+            {
+                foreach (var result in results)
+                {
+                    var (patchedFile, _) = result;
+                    var hash = patchedFile.PatchedFileHashes.XxHash3;
+                    var hasFile = await FileStore.HaveFile(hash);
+                    Debug.Assert(hasFile, "expected the file store to have the file it just backed up...");
+                }
+            }
+
+            return results.Select(static x => x.Item1).ToArray();
+        }
+        finally
+        {
+            // Parallel patching can fail or be cancelled after other entries have completed.
+            foreach (var result in results) result.Item2?.Dispose();
+        }
     }
 
     private record struct PatchedFile(RelativePath FileName, MultiHash PatchedFileHashes, MultiHash OriginalFileHashes);
@@ -422,19 +463,27 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
         if (!collectionFiles.TryGetValue(patchName, out var patchFile)) throw new KeyNotFoundException($"Collection archive doesn't contain file `{patchName}`");
 
         var patchedFileStream = new MemoryStream(capacity: (int)srcFile.Size.Value);
-        var (originalFileHashes, patchedFileHashes) = await PatchFile(fileToPatch: srcFile, patchDataFile: patchFile, expectedHash: expectedHash, outputStream: patchedFileStream, cancellationToken: cancellationToken);
+        try
+        {
+            var (originalFileHashes, patchedFileHashes) = await PatchFile(fileToPatch: srcFile, patchDataFile: patchFile, expectedHash: expectedHash, outputStream: patchedFileStream, cancellationToken: cancellationToken);
 
-        var patchedFile = new PatchedFile(
-            FileName: srcPath,
-            PatchedFileHashes: patchedFileHashes,
-            OriginalFileHashes: originalFileHashes
-        );
+            var patchedFile = new PatchedFile(
+                FileName: srcPath,
+                PatchedFileHashes: patchedFileHashes,
+                OriginalFileHashes: originalFileHashes
+            );
 
-        Debug.Assert(Size.FromLong(patchedFileStream.Length) == patchedFileHashes.Size.Value);
-        Logger.LogDebug("Patching result: `{PatchedFile}`", patchedFile);
+            Debug.Assert(Size.FromLong(patchedFileStream.Length) == patchedFileHashes.Size.Value);
+            Logger.LogDebug("Patching result: `{PatchedFile}`", patchedFile);
 
-        patchedFileStream.Position = 0;
-        return (patchedFile, patchedFileStream);
+            patchedFileStream.Position = 0;
+            return (patchedFile, patchedFileStream);
+        }
+        catch
+        {
+            patchedFileStream.Dispose();
+            throw;
+        }
     }
 
     private async ValueTask<(MultiHash OriginalFileHashes, MultiHash PatchedFileHashes)> PatchFile(LibraryFile.ReadOnly fileToPatch, LibraryFile.ReadOnly patchDataFile, Crc32Value expectedHash, Stream outputStream, CancellationToken cancellationToken)

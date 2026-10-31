@@ -42,3 +42,7 @@ coverage.json
 
 # python virtual environment
 .venv
+
+# Local development preview and test output
+/artifacts/
+/TestResults/

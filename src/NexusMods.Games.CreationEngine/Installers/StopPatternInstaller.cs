@@ -106,86 +106,76 @@ public class StopPatternInstaller(IServiceProvider serviceProvider) : ALibraryAr
 
 #endregion
 
-    private bool _isBuilt = false;
-    
-    // The /Data folder for the current game
-    private RelativePath _dataPrefix = null!;
-    private RelativePath[] _gameFolders = null!;
+    private bool _isBuilt;
+    private RelativePath _dataPrefix;
+    private RelativePath[] _gameFolders = [];
+    private RelativePath[] _topLevelPaths = [];
     private Regex _stopPatterns = null!;
     private Regex _engineFiles = null!;
-    private RelativePath[] _topLevelPaths = null!;
-
 
     /// <summary>
-    /// Optimizes the installer given the settings, must be called before the installer can be used.
+    /// Compiles the game-specific archive layout rules.
     /// </summary>
     public StopPatternInstaller Build()
     {
         _dataPrefix = RelativePath.FromUnsanitizedInput(DataFolderName);
-        _gameFolders = GameAliases.Select(g => RelativePath.FromUnsanitizedInput(g)).ToArray();
-        _engineFiles = CombineRegexes(EngineFiles);
-        _topLevelPaths = TopLevelDirs.Select(t => RelativePath.FromUnsanitizedInput(t)).ToArray();
-        _isBuilt = true;
+        _gameFolders = GameAliases.Select(folder => RelativePath.FromUnsanitizedInput(folder)).ToArray();
+        _topLevelPaths = TopLevelDirs.Select(folder => RelativePath.FromUnsanitizedInput(folder)).ToArray();
+        _engineFiles = CombineRegexes(EngineFiles.Select(pattern => $"^(?:{pattern})$").ToArray());
 
-        // Now combine all the sources of stop patterns
-        
-        List<string> patterns = new();
-        
-        foreach (var ext in PluginLikeExtensions)
-            patterns.Add($"\\{ext.ToString()}$");
-        
-        foreach (var ext in ArchiveLikeExtensions)
-            patterns.Add($"\\.{ext.ToString()}$");
-        
-        foreach (var dir in TopLevelDirs)
-            patterns.Add($"(^|/)({dir})(/|$)");
-        
-        foreach (var pattern in StopPatterns)
-            patterns.Add(pattern);
-        
-        _stopPatterns = CombineRegexes(patterns.ToArray());
-        
+        var patterns = PluginLikeExtensions.Concat(ArchiveLikeExtensions)
+            .Select(extension => $"{Regex.Escape(extension.ToString())}$")
+            .Concat(TopLevelDirs.Select(directory => $"(^|/){Regex.Escape(directory)}(/|$)"))
+            .Concat(StopPatterns)
+            .ToArray();
+        _stopPatterns = CombineRegexes(patterns);
+        _isBuilt = true;
         return this;
     }
 
-
-    /// <summary>
-    /// Combines regex patters into a single regex that ors them together.
-    /// </summary>
-    private Regex CombineRegexes(params string[] patterns)
+    private static Regex CombineRegexes(string[] patterns)
     {
-        var combined = string.Join("|", patterns.Select(p => $"(?:{p})"));
-        return new Regex(combined, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        var combined = patterns.Length == 0 ? "(?!)" : string.Join("|", patterns.Select(pattern => $"(?:{pattern})"));
+        return new Regex(combined, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
     }
-    
 
-
-    public override ValueTask<InstallerResult> ExecuteAsync(LibraryArchive.ReadOnly libraryArchive, LoadoutItemGroup.New loadoutGroup, ITransaction transaction, Loadout.ReadOnly loadout, CancellationToken cancellationToken)
+    public override ValueTask<InstallerResult> ExecuteAsync(
+        LibraryArchive.ReadOnly libraryArchive,
+        LoadoutItemGroup.New loadoutGroup,
+        ITransaction transaction,
+        Loadout.ReadOnly loadout,
+        CancellationToken cancellationToken)
     {
-        if (!_isBuilt)
-            throw new InvalidOperationException("The installer has not been built yet.");
-            
-        // Flatten all files
-        var allFiles = libraryArchive.Children.ToArray();
-        
-        if (allFiles.Length == 0)
+        if (!_isBuilt) throw new InvalidOperationException("The installer has not been built yet.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var files = libraryArchive.Children.ToArray();
+        if (files.Length == 0)
             return ValueTask.FromResult(FailWithReason("The provided library archive has no files"));
 
-        // Compute the root prefix
-        var rootPrefix = ComputeEffectiveRootPrefix(allFiles);
+        if (!TryComputeEffectiveRootPrefix(files, out var root))
+            return ValueTask.FromResult(FailWithReason("The archive has no unambiguous Creation Engine mod folder. Select its files with a manual installer."));
 
-        foreach (var file in allFiles)
+        // Resolve all destinations before adding anything to the installation transaction.
+        // Data/Foo.esp and Foo.esp, including case variants, must not silently overwrite one another.
+        var destinations = new Dictionary<GamePath, LibraryArchiveFileEntry.ReadOnly>();
+        foreach (var file in files)
         {
-            if (!file.Path.InFolder(rootPrefix))
-                continue;
-            
-            var rel = StripLeadingData(file.Path.RelativeTo(rootPrefix));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!file.Path.InFolder(root)) continue;
+            var relative = StripLeadingData(file.Path.RelativeTo(root));
+            var targetBase = relative.Parent == RelativePath.Empty && _engineFiles.IsMatch(relative.ToString()) ? EnginePath : DataPath;
+            var target = new GamePath(targetBase.LocationId, targetBase.Path / relative);
+            if (!destinations.TryAdd(target, file))
+                return ValueTask.FromResult(FailWithReason($"More than one archive file maps to {target}. Select the intended variant with a manual installer."));
+        }
 
-            var targetBase = _engineFiles.IsMatch(rel.ToString()) ? EnginePath : DataPath;
+        if (destinations.Count == 0)
+            return ValueTask.FromResult(FailWithReason("The selected mod folder has no installable files"));
 
-            var target = new GamePath(targetBase.LocationId, targetBase.Path / rel);
-            
-            var libFile = file.AsLibraryFile();
+        foreach (var (target, file) in destinations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var libraryFile = file.AsLibraryFile();
             _ = new LoadoutFile.New(transaction, out var id)
             {
                 LoadoutItemWithTargetPath = new LoadoutItemWithTargetPath.New(transaction, id)
@@ -198,115 +188,54 @@ public class StopPatternInstaller(IServiceProvider serviceProvider) : ALibraryAr
                         ParentId = loadoutGroup.Id,
                     },
                 },
-                Hash = libFile.Hash,
-                Size = libFile.Size,
+                Hash = libraryFile.Hash,
+                Size = libraryFile.Size,
             };
         }
-
         return ValueTask.FromResult<InstallerResult>(new Success());
     }
 
-    private RelativePath ComputeEffectiveRootPrefix(LibraryArchiveFileEntry.ReadOnly[] files)
+    private bool TryComputeEffectiveRootPrefix(LibraryArchiveFileEntry.ReadOnly[] files, out RelativePath root)
     {
-        var firstSegments = files
-            .Select(file => file.Path.TopParent)
-            .Where(file => file != default(RelativePath))
-            .Distinct()
-            .ToArray();
-
-        if (firstSegments.Length == 1)
+        root = RelativePath.Empty;
+        while (true)
         {
-            var top = firstSegments[0];
-            
-            // Case A: The first segment is the game's root folder, step into it
-            if (top == _dataPrefix)
-                return top;
-            
-            // Case B: The first segment is a game folder, step into it
-            if (_gameFolders.Contains(top))
-                return top;
-            
-            if (_topLevelPaths.Contains(top))
-                return RelativePath.Empty;
-            
-            // Case C: single top folder that's a generic wrapper (e.g. the mod's name)
-            // If its children show any stop patterns: (esl/esp, fomod, common dirs), 
-            // then step into the pointless wrapper
-            if (FolderLikelyWrapper(files, top))
-                return top;
-            
-            return RelativePath.Empty;
+            var prefix = root;
+            var relative = files.Where(file => file.Path.InFolder(prefix)).Select(file => file.Path.RelativeTo(prefix)).ToArray();
+            if (relative.Any(HasRootContent)) return true;
+
+            // Repeated wrappers are common. Descend only when one folder contains mod content;
+            // archives with multiple optional variants require an explicit choice.
+            var candidates = relative.Where(path => path.Parent != RelativePath.Empty)
+                .Select(path => path.TopParent).Distinct()
+                .Where(folder => relative.Where(path => path.InFolder(folder))
+                    .Any(path => HasRecognizableContent(path.RelativeTo(folder))))
+                .ToArray();
+            if (candidates.Length != 1) return false;
+            root /= candidates[0];
         }
-        
-        // Multiple Top Folders
-        
-        // Stop patterns at root
-        if (HasStopPatternAtOrBelow(files, _dataPrefix))
-            return RelativePath.Empty;
-        
-        // Data folder at the top level
-        if (firstSegments.Any(p => p == _dataPrefix))
-            return _dataPrefix;
-            
-        // Game folder at the top level
-        if (firstSegments.Where(p => _gameFolders.Contains(p)).TryGetFirst(out var gameTop))
-            return gameTop;
-        
-        return RelativePath.Empty;
     }
 
-    /// <summary>
-    /// Returns true if the folder is likely to be a wrapper for a mod.
-    /// </summary>
-    private bool FolderLikelyWrapper(LibraryArchiveFileEntry.ReadOnly[] files, RelativePath prefix)
+    private bool HasRootContent(RelativePath path)
     {
-        foreach (var file in files)
-        {
-            if (TryToRelativePathBelow(file.Path, prefix, out var below) && StopMatched(below))
-            {
-                return true;
-            }
-        }
-        return false;
+        if (path.Parent == RelativePath.Empty)
+            return PluginLikeExtensions.Contains(path.Extension) || ArchiveLikeExtensions.Contains(path.Extension) || _engineFiles.IsMatch(path.ToString());
+        var top = path.TopParent;
+        return top == _dataPrefix || _topLevelPaths.Contains(top) || _stopPatterns.IsMatch(top + "/");
     }
 
-    private bool HasStopPatternAtOrBelow(LibraryArchiveFileEntry.ReadOnly[] files, RelativePath prefix)
+    private bool HasRecognizableContent(RelativePath path)
     {
-        foreach (var file in files)
-        {
-            if (file.Path == default(RelativePath) || file.Path.InFolder(prefix))
-            {
-                if (StopMatched(file.Path))
-                    return true;
-                
-            }
-        }
-        return false;
+        return _stopPatterns.IsMatch(path.ToString()) || _engineFiles.IsMatch(path.FileName.ToString()) ||
+               path.ToString().Split('/').SkipLast(1).Any(folder =>
+                   string.Equals(folder, DataFolderName, StringComparison.OrdinalIgnoreCase) ||
+                   _gameFolders.Contains(RelativePath.FromUnsanitizedInput(folder)));
     }
-    
+
     private RelativePath StripLeadingData(RelativePath path)
     {
-        if (path.InFolder(_dataPrefix))
-            return path.RelativeTo(_dataPrefix);
+        while (path.InFolder(_dataPrefix))
+            path = path.RelativeTo(_dataPrefix);
         return path;
-    }
-
-    /// <summary>
-    /// Returns true if the file's path is below the given prefix and matches any of the stop patterns.
-    /// </summary>
-    private bool TryToRelativePathBelow(RelativePath filePath, RelativePath prefix, out RelativePath below)
-    {
-        if (!filePath.InFolder(prefix))
-        {
-            below = default(RelativePath);
-            return false;
-        }
-        below = filePath.RelativeTo(prefix);
-        return true;
-    }
-
-    private bool StopMatched(RelativePath path)
-    {
-        return _stopPatterns.IsMatch(path.ToString());
     }
 }

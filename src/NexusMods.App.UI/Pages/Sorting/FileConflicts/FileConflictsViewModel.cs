@@ -24,6 +24,7 @@ using NexusMods.MnemonicDB.Abstractions;
 using Humanizer;
 using NexusMods.Sdk.Games;
 using NexusMods.Sdk.Loadouts;
+using NexusMods.Sdk.Reactive;
 using NexusMods.Sdk.Resources;
 using NexusMods.UI.Sdk;
 using R3;
@@ -426,7 +427,7 @@ public class FileConflictsTreeDataGridAdapter : TreeDataGridAdapter<CompositeIte
                synchronizer.PriorityGroups({connection})
              WHERE Loadout = {loadoutId};
              """
-        ).Observe(tuple => tuple.Id);
+        ).ObserveOwned(tuple => tuple.Id);
     }
 
     protected override IColumn<CompositeItemModel<EntityId>>[] CreateColumns(bool viewHierarchical)

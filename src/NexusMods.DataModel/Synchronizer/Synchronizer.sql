@@ -4,15 +4,30 @@ CREATE SCHEMA IF NOT EXISTS synchronizer;
 -- The sources of items in the loadout.
 CREATE TYPE synchronizer.ItemType AS ENUM ('Loadout', 'Game', 'Deleted', 'Intrinsic');
 
--- Gets all loadout item groups and their enabled state
+-- Only groups reachable from an enabled root in the same loadout are enabled.
+-- Starting at roots also fails closed for orphaned parents, cross-loadout links,
+-- and parent cycles: none can become reachable through a valid parent chain.
 CREATE OR REPLACE MACRO synchronizer.LoadoutGroups (db) AS TABLE
+WITH RECURSIVE
+  item_groups AS (
+    SELECT * FROM MDB_LOADOUTITEMGROUP (Db => db)
+  ),
+  enabled_groups AS (
+    SELECT Id, Loadout
+    FROM item_groups
+    WHERE Parent IS NULL AND Disabled = FALSE
+    UNION
+    SELECT child.Id, child.Loadout
+    FROM item_groups child
+      JOIN enabled_groups parent ON child.Parent = parent.Id AND child.Loadout = parent.Loadout
+    WHERE child.Disabled = FALSE
+  )
 SELECT
   loadout_item_group.*,
-  loadout_item_group.Disabled = FALSE
-  AND COALESCE(collection_group.Disabled, FALSE) = FALSE AS IsEnabled
+  enabled_group.Id IS NOT NULL AS IsEnabled
 FROM
-  MDB_LOADOUTITEMGROUP (Db => db) loadout_item_group
-  LEFT JOIN MDB_COLLECTIONGROUP (Db => db) collection_group ON loadout_item_group.Parent = collection_group.Id;
+  item_groups loadout_item_group
+  LEFT JOIN enabled_groups enabled_group ON loadout_item_group.Id = enabled_group.Id;
 
 -- All leaf loadout items with a target path
 CREATE OR REPLACE MACRO synchronizer.LeafLoadoutItems (db) AS TABLE
@@ -24,13 +39,12 @@ SELECT
   loadout_file.Hash,
   loadout_file.Size,
   loadout_item.Disabled = FALSE
-  AND loadout_item_group.Disabled = FALSE
-  AND COALESCE(collection_group.Disabled, FALSE) = FALSE AS IsEnabled,
+  AND (loadout_item.Parent IS NULL OR COALESCE(loadout_item_group.IsEnabled, FALSE)) AS IsEnabled,
   deleted_file.Id IS NOT NULL AS IsDeleted
 FROM
   MDB_LOADOUTITEMWITHTARGETPATH (Db => db) loadout_item
-  LEFT JOIN MDB_LOADOUTITEMGROUP (Db => db) loadout_item_group ON loadout_item.Parent = loadout_item_group.Id
-  LEFT JOIN MDB_COLLECTIONGROUP (Db => db) collection_group ON loadout_item_group.Parent = collection_group.Id
+  LEFT JOIN synchronizer.LoadoutGroups (db) loadout_item_group
+    ON loadout_item.Parent = loadout_item_group.Id AND loadout_item.Loadout = loadout_item_group.Loadout
   LEFT JOIN MDB_DELETEDFILE (Db => db) deleted_file ON loadout_item.Id = deleted_file.Id
   LEFT JOIN MDB_LOADOUTFILE (Db => db) loadout_file on loadout_item.Id = loadout_file.Id;
 

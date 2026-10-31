@@ -5,8 +5,11 @@ using Microsoft.Extensions.DependencyInjection;
 
 using NexusMods.Abstractions.Library;
 using NexusMods.Abstractions.Loadouts;
+using NexusMods.Abstractions.Loadouts.Extensions;
+using NexusMods.Abstractions.Loadouts.Synchronizers.Conflicts;
 using NexusMods.Games.TestFramework;
 using NexusMods.MnemonicDB.Abstractions;
+using NexusMods.MnemonicDB.Abstractions.ElementComparers;
 using NexusMods.Paths;
 using NexusMods.Paths.Utilities;
 using NexusMods.Sdk;
@@ -276,6 +279,171 @@ public class LibraryServiceTests : ACyberpunkIsolatedGameTest<LibraryServiceTest
         // Verify that new item2 is not in any loadout (because it wasn't installed due to read-only filter)
         var loadoutsWithNewItem2 = _libraryService.LoadoutsWithLibraryItem(newItem2);
         loadoutsWithNewItem2.Should().BeEmpty("because the item in read-only collection should not be replaced");
+    }
+
+    [Fact]
+    public async Task ReplaceLinkedItemsInAllLoadouts_PreservesEveryCopyAndItsSettings()
+    {
+        var loadout = await CreateTestLoadout("Multiple collections");
+        var defaultCollection = await CreateCollectionInLoadout(loadout, "Default collection");
+        var firstCollection = await CreateCollectionInLoadout(loadout, "First collection");
+        var disabledCollection = await CreateCollectionInLoadout(loadout, "Disabled collection");
+        var archivePath = FileSystem.GetKnownPath(KnownPath.CurrentDirectory).Combine("Resources/nested_archive.zip");
+        var oldItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+        var newItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+        var unrelatedItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+
+        var explicitlyDisabled = (await LoadoutManager.InstallItem(oldItem, loadout,
+            parent: firstCollection.AsLoadoutItemGroup().LoadoutItemGroupId)).LoadoutItemGroup!.Value;
+        var unrelated = (await LoadoutManager.InstallItem(unrelatedItem, loadout,
+            parent: defaultCollection.AsLoadoutItemGroup().LoadoutItemGroupId)).LoadoutItemGroup!.Value;
+        await LoadoutManager.InstallItem(oldItem, loadout,
+            parent: disabledCollection.AsLoadoutItemGroup().LoadoutItemGroupId);
+        // Two copies in the same collection must also remain separate replacements.
+        await LoadoutManager.InstallItem(oldItem, loadout,
+            parent: firstCollection.AsLoadoutItemGroup().LoadoutItemGroupId);
+
+        using (var tx = _connection.BeginTransaction())
+        {
+            tx.Add(explicitlyDisabled.Id, LoadoutItem.Disabled, Null.Instance);
+            tx.Add(disabledCollection.Id, LoadoutItem.Disabled, Null.Instance);
+            await tx.Commit();
+        }
+
+        var expected = _libraryService.LoadoutsWithLibraryItem(oldItem)
+            .Select(tuple =>
+            {
+                var group = tuple.linkedItem.AsLoadoutItemGroup();
+                var item = group.AsLoadoutItem();
+                return (item.ParentId, item.IsDisabled, Priority: GetPriority(group.LoadoutItemGroupId));
+            }).ToArray();
+        var unrelatedPriority = GetPriority(unrelated.LoadoutItemGroupId);
+
+        var result = await _libraryService.ReplaceLinkedItemsInAllLoadouts(oldItem, newItem,
+            new ReplaceLibraryItemOptions { IgnoreReadOnlyCollections = true });
+
+        result.Should().Be(LibraryItemReplacementResult.Success);
+        _libraryService.LoadoutsWithLibraryItem(oldItem).Should().BeEmpty();
+        var replacements = _libraryService.LoadoutsWithLibraryItem(newItem)
+            .Select(tuple => tuple.linkedItem.AsLoadoutItemGroup()).ToArray();
+        replacements.Should().HaveCount(3);
+        replacements.Select(group =>
+        {
+            var item = group.AsLoadoutItem();
+            return (item.ParentId, item.IsDisabled, Priority: GetPriority(group.LoadoutItemGroupId));
+        }).Should().BeEquivalentTo(expected);
+        GetPriority(unrelated.LoadoutItemGroupId).Should().Be(unrelatedPriority);
+        LoadoutItemGroup.Load(_connection.Db, unrelated.Id).IsValid().Should().BeTrue();
+
+        var inheritedDisabled = replacements.Single(group => group.AsLoadoutItem().ParentId.Value == disabledCollection.Id);
+        inheritedDisabled.AsLoadoutItem().IsDisabled.Should().BeFalse();
+        inheritedDisabled.AsLoadoutItem().IsEnabled().Should().BeFalse();
+        using (var tx = _connection.BeginTransaction())
+        {
+            tx.Retract(disabledCollection.Id, LoadoutItem.Disabled, Null.Instance);
+            await tx.Commit();
+        }
+
+        LoadoutItem.Load(_connection.Db, inheritedDisabled.Id).IsEnabled().Should().BeTrue();
+        var remainsDisabled = replacements.Single(group => group.AsLoadoutItem().IsDisabled);
+        LoadoutItem.Load(_connection.Db, remainsDisabled.Id).IsEnabled().Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReplaceLinkedItemsInAllLoadouts_PreservesRootItemsWithoutACollection(bool isDisabled)
+    {
+        var loadout = await CreateTestLoadout("Legacy root items");
+        var archivePath = FileSystem.GetKnownPath(KnownPath.CurrentDirectory).Combine("Resources/nested_archive.zip");
+        var oldItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+        var newItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+
+        using (var tx = _connection.BeginTransaction())
+        {
+            var group = new LoadoutItemGroup.New(tx, out var groupId)
+            {
+                IsGroup = true,
+                LoadoutItem = new LoadoutItem.New(tx, groupId)
+                {
+                    Name = "Root mod",
+                    LoadoutId = loadout,
+                    IsDisabled = isDisabled,
+                },
+            };
+            _ = new LibraryLinkedLoadoutItem.New(tx, groupId)
+            {
+                LoadoutItemGroup = group,
+                LibraryItemId = oldItem,
+            };
+            _ = new LoadoutItemGroupPriority.New(tx)
+            {
+                LoadoutId = loadout,
+                TargetId = group,
+                Priority = ConflictPriority.From(42),
+            };
+            await tx.Commit();
+        }
+
+        var result = await _libraryService.ReplaceLinkedItemsInAllLoadouts(oldItem, newItem,
+            new ReplaceLibraryItemOptions { IgnoreReadOnlyCollections = true });
+
+        result.Should().Be(LibraryItemReplacementResult.Success);
+        _libraryService.LoadoutsWithLibraryItem(oldItem).Should().BeEmpty();
+        var replacement = _libraryService.LoadoutsWithLibraryItem(newItem).Should().ContainSingle()
+            .Which.linkedItem.AsLoadoutItemGroup();
+        replacement.AsLoadoutItem().HasParent().Should().BeFalse();
+        replacement.AsLoadoutItem().IsDisabled.Should().Be(isDisabled);
+        replacement.Children.Should().NotBeEmpty("the replacement must still run the normal archive installer");
+        GetPriority(replacement.LoadoutItemGroupId).Should().Be(ConflictPriority.From(42));
+    }
+
+    [Fact]
+    public async Task ReplaceLinkedItemsInAllLoadouts_RespectsNestedReadOnlyCollections()
+    {
+        var loadout = await CreateTestLoadout("Nested collections");
+        var mutableCollection = await CreateCollectionInLoadout(loadout, "Mutable collection");
+        var readOnlyCollection = await CreateCollectionInLoadout(loadout, "Read-only collection", isReadOnly: true);
+        var mutableParent = await CreateNestedGroup(loadout, mutableCollection.AsLoadoutItemGroup().LoadoutItemGroupId);
+        var readOnlyParent = await CreateNestedGroup(loadout, readOnlyCollection.AsLoadoutItemGroup().LoadoutItemGroupId);
+        var archivePath = FileSystem.GetKnownPath(KnownPath.CurrentDirectory).Combine("Resources/nested_archive.zip");
+        var oldItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+        var newItem = (await _libraryService.AddLocalFile(archivePath)).AsLibraryFile().AsLibraryItem();
+        await LoadoutManager.InstallItem(oldItem, loadout, parent: mutableParent.LoadoutItemGroupId);
+        var readOnlyItem = (await LoadoutManager.InstallItem(oldItem, loadout,
+            parent: readOnlyParent.LoadoutItemGroupId)).LoadoutItemGroup!.Value;
+
+        var result = await _libraryService.ReplaceLinkedItemsInAllLoadouts(oldItem, newItem,
+            new ReplaceLibraryItemOptions { IgnoreReadOnlyCollections = true });
+
+        result.Should().Be(LibraryItemReplacementResult.Success);
+        _libraryService.LoadoutsWithLibraryItem(oldItem).Should().ContainSingle()
+            .Which.linkedItem.Id.Should().Be(readOnlyItem.Id);
+        var replacement = _libraryService.LoadoutsWithLibraryItem(newItem).Should().ContainSingle()
+            .Which.linkedItem.AsLoadoutItem();
+        replacement.ParentId.Should().Be(mutableParent.LoadoutItemGroupId);
+        LoadoutItem.Load(_connection.Db, readOnlyItem.Id).ParentId.Should().Be(readOnlyParent.LoadoutItemGroupId);
+    }
+
+    private ConflictPriority GetPriority(LoadoutItemGroupId groupId)
+    {
+        return LoadoutItemGroupPriority.FindByTarget(_connection.Db, groupId).Should().ContainSingle().Which.Priority;
+    }
+
+    private async Task<LoadoutItemGroup.ReadOnly> CreateNestedGroup(LoadoutId loadout, LoadoutItemGroupId parent)
+    {
+        using var tx = _connection.BeginTransaction();
+        var group = new LoadoutItemGroup.New(tx, out var groupId)
+        {
+            IsGroup = true,
+            LoadoutItem = new LoadoutItem.New(tx, groupId)
+            {
+                Name = "Nested group",
+                LoadoutId = loadout,
+                ParentId = parent,
+            },
+        };
+        return (await tx.Commit()).Remap(group);
     }
 
     private async Task<Loadout.ReadOnly> CreateTestLoadout(string name)

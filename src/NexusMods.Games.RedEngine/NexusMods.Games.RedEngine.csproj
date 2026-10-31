@@ -27,6 +27,7 @@
         <EmbeddedResource Include="Resources\Cyberpunk2077\thumbnail.webp" />
         <None Remove="Resources\Cyberpunk2077\tile.webp" />
         <EmbeddedResource Include="Resources\Cyberpunk2077\tile.webp" />
+        <EmbeddedResource Include="Resources\Witcher3\placeholder.png" />
     </ItemGroup>
 
     <Import Project="build\NexusMods.Games.RedEngine.targets" />

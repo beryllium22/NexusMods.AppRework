@@ -16,6 +16,8 @@ public partial class GameWidget : ReactiveUserControl<IGameWidgetViewModel>
 
         this.WhenActivated(d =>
             {
+                this.OneWayBind(ViewModel, vm => vm.IsExperimental, view => view.ExperimentalBadge.IsVisible)
+                    .DisposeWith(d);
                 this.WhenAnyValue(view => view.ViewModel!.State)
                     .Subscribe(state =>
                         {

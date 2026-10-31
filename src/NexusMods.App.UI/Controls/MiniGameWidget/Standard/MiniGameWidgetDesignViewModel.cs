@@ -17,6 +17,7 @@ public class MiniGameWidgetDesignViewModel : AViewModel<IMiniGameWidgetViewModel
     public GameInstallation[]? GameInstallations { get; set; }
     public string Name { get; set; } = "Cyberpunk 2077";
     public bool IsFound { get; set; } = true;
+    public bool IsExperimental { get; set; }
     public Bitmap Image { get; set; } = new(AssetLoader.Open(new Uri("avares://NexusMods.App.UI/Assets/DesignTime/cyberpunk_game.png")));
 
     public ReactiveCommand<Unit, Unit> GiveFeedbackCommand { get; } = ReactiveCommand.CreateFromTask(() => Task.CompletedTask);

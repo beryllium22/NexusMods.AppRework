@@ -49,6 +49,9 @@
                                              ShowLabel="False"
                                              LeftIcon="{x:Static icons:IconValues.Close}" />
                 </Panel>
+                <TextBlock x:Name="InputValidationErrorText"
+                           TextWrapping="Wrap"
+                           Foreground="{StaticResource DangerModerateBrush}" />
             </StackPanel>
         </StackPanel>
 

@@ -1,5 +1,6 @@
 using System.Collections.Frozen;
 using System.Diagnostics;
+using System.Xml.Linq;
 using FomodInstaller.Interface;
 using FomodInstaller.Scripting;
 using FomodInstaller.Scripting.XmlScript;
@@ -24,7 +25,6 @@ namespace NexusMods.Games.FOMOD;
 
 public class FomodXmlInstaller : ALibraryArchiveInstaller
 {
-    private readonly ICoreDelegates _delegates;
     private readonly XmlScriptType _scriptType = new();
     private readonly ILogger<FomodXmlInstaller> _logger;
     private readonly GamePath _fomodInstallationPath;
@@ -51,7 +51,6 @@ public class FomodXmlInstaller : ALibraryArchiveInstaller
         _logger = logger;
         _fomodInstallationPath = fomodInstallationPath;
 
-        _delegates = serviceProvider.GetRequiredService<ICoreDelegates>();
         _temporaryFileManager = serviceProvider.GetRequiredService<TemporaryFileManager>();
         _fileSystem = serviceProvider.GetRequiredService<IFileSystem>();
         _fileStore = serviceProvider.GetRequiredService<IFileStore>();
@@ -73,8 +72,10 @@ public class FomodXmlInstaller : ALibraryArchiveInstaller
         ITransaction transaction,
         Loadout.ReadOnly loadout,
         FomodOption[]? options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        LoadoutItemGroupId? installingCollection = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!libraryArchive.Children.TryGetFirst(x => x.Path.EndsWith(FomodConstants.XmlConfigRelativePath), out var xmlFile))
             return new NotSupported(Reason: "Found no FOMOD data in the archive");
 
@@ -100,35 +101,48 @@ public class FomodXmlInstaller : ALibraryArchiveInstaller
         // NOTE(erri120): We're loading the script manually, otherwise the FOMOD library will load the script from the file system
         await mod.InitializeWithoutLoadingScript();
 
-        // NOTE(erri120): The FOMOD library calls us, so this is the only way we can pass data along.
-        var installerDelegates = _delegates as InstallerDelegates;
+        // Games reuse their installer instances. Delegates, presets, dialog callbacks and
+        // dependency snapshots must belong to this execution, including parallel installs.
+        using var delegateScope = ServiceProvider.CreateScope();
+        var coreDelegates = delegateScope.ServiceProvider.GetRequiredService<ICoreDelegates>();
+        var installerDelegates = coreDelegates as InstallerDelegates;
+        FomodDependencySnapshot? dependencies = null;
         if (installerDelegates is not null)
         {
-            if (options is not null)
-            {
-                // NOTE(halgari) The support for passing in presets to the installer is utterly broken. So we're going to
-                // something different: we will create a new guided installer that will simply emit the user choices based on the
-                // provided options.
-                var installer = new PresetGuidedInstaller(options);
-                installerDelegates.UiDelegates = new UiDelegates(ServiceProvider.GetRequiredService<ILogger<UiDelegates>>(), installer);
-            }
-
+            dependencies = delegateScope.ServiceProvider.GetRequiredService<IFomodDependencyResolver>().Capture(loadout, installingCollection);
+            installerDelegates.Initialize(FomodDependencyState.Create(dependencies, _fomodInstallationPath), options, cancellationToken);
             installerDelegates.UiDelegates.CurrentFomodArchiveFiles = fomodArchiveFiles;
         }
 
         var rawScript = await LoadScript(xmlFile.AsLibraryFile().Hash, cancellationToken);
 
-        var executor = _scriptType.CreateExecutor(mod, _delegates);
+        var executor = _scriptType.CreateExecutor(mod, coreDelegates);
         var installScript = _scriptType.LoadScript(rawScript, true);
         FixScript(installScript, fomodArchiveFiles, _logger);
+        if (dependencies is { GameVersion: null } && XDocument.Parse(rawScript).Descendants()
+            .Any(element => element.Name.LocalName is "gameDependency" or "falloutDependency"))
+            throw new NotSupportedException("This FOMOD checks the game version, but the primary executable's version could not be read. Verify the game installation and try again.");
 
-        var instructions = await executor.Execute(installScript, "", null);
+        IList<Instruction> instructions;
+        try
+        {
+            instructions = await executor.Execute(installScript, "", null);
+        }
+        catch
+        {
+            installerDelegates?.UiDelegates.ThrowIfFailed();
+            throw;
+        }
+        finally
+        {
+            installerDelegates?.UiDelegates.EndDialog();
+        }
 
-        // NOTE(err120): Reset the previously provided data
-        if (installerDelegates is not null) installerDelegates.UiDelegates.CurrentFomodArchiveFiles = fomodArchiveFiles;
+        installerDelegates?.UiDelegates.ThrowIfFailed();
+        cancellationToken.ThrowIfCancellationRequested();
 
         var errors = instructions.Where(instruction => instruction.type == "error").ToArray();
-        if (errors.Length != 0) throw new Exception(string.Join("; ", errors.Select(err => err.source)));
+        if (errors.Length != 0) throw new InvalidDataException(string.Join("; ", errors.Select(err => err.source)));
 
         foreach (var warning in instructions.Where(instruction => instruction.type == "unsupported"))
             _logger.LogWarning("Installer uses unsupported function: {}", warning.source);
@@ -169,9 +183,18 @@ public class FomodXmlInstaller : ALibraryArchiveInstaller
     {
         foreach (var installableFile in installableFiles)
         {
+            ValidateRelativePath(RemoveRoot(installableFile.Source).ToString());
+            ValidateRelativePath(RemoveRoot(installableFile.Destination).ToString());
             installableFile.Source = FixPath(installableFile.Source, fomodArchiveFiles, isDirectory: installableFile.IsFolder, logger: logger);
             installableFile.Destination = RelativePath.FromUnsanitizedInput(RemoveRoot(installableFile.Destination));
         }
+    }
+
+    private static void ValidateRelativePath(string input)
+    {
+        var normalized = input.Replace('\\', '/');
+        if (normalized.Contains(':') || normalized.Split('/').Any(segment => segment == ".."))
+            throw new InvalidDataException($"The FOMOD installer references a path outside its installation directory: '{input}'.");
     }
 
     private static readonly char[] TrimChars = ['\\', '/'];
@@ -237,8 +260,7 @@ public class FomodXmlInstaller : ALibraryArchiveInstaller
 
         if (!fomodArchiveFiles.TryGetValue(src, out var libraryArchiveFile))
         {
-            _logger.LogError("Didn't find source file `{Path}` in FOMOD archive", src);
-            return;
+            throw new InvalidDataException($"The FOMOD installer references missing archive file '{src}'.");
         }
 
         _ = new LoadoutFile.New(transaction, out var id)

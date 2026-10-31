@@ -14,6 +14,12 @@ namespace NexusMods.Sdk;
 public static class ApplicationConstants
 {
     /// <summary>
+    /// Stable directory and file identity for App Rework's own persisted state.
+    /// Keeps default storage separate from the original Nexus Mods App.
+    /// </summary>
+    public const string StorageName = "NexusMods.AppRework";
+
+    /// <summary>
     /// Whether the application is running in debug mode.
     /// </summary>
     public static readonly bool IsDebug;

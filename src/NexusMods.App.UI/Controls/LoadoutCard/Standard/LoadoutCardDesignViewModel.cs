@@ -1,6 +1,4 @@
 using System.Reactive;
-using System.Reactive.Disposables;
-using System.Reactive.Linq;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -13,34 +11,22 @@ namespace NexusMods.App.UI.Controls.LoadoutCard;
 
 public class LoadoutCardDesignViewModel : AViewModel<ILoadoutCardViewModel>, ILoadoutCardViewModel
 {
-    public LoadoutCardDesignViewModel()
-    {
-        this.WhenActivated(d =>
-            {
-                // Cycle thorough all the states for preview purposes
-                Observable.Interval(TimeSpan.FromSeconds(2.5))
-                    .Subscribe(_ =>
-                    {
-                        IsDeleting = !IsDeleting;
-                    })
-                    .DisposeWith(d);
-            }
-        );
-
-    }
-    
-    public ILoadoutBadgeViewModel LoadoutBadgeViewModel { get; } = new LoadoutBadgeDesignViewModel();
-    public string LoadoutName { get; } = "Loadout B";
-    public IImage LoadoutImage { get; } = Bitmap.DecodeToWidth(AssetLoader.Open(new Uri("avares://NexusMods.App.UI/Assets/DesignTime/thumbnail.webp")), (int) ImageSizes.GameThumbnail.Width);
-
-    public bool IsLoadoutApplied { get; } = false;
-    public string HumanizedLoadoutLastApplyTime { get; } = "Last applied 2 months ago";
-    public string HumanizedLoadoutCreationTime { get; } = "Created 10 months ago";
-    public string LoadoutModCount { get; } = "Mods 276";
-    [Reactive] public bool IsDeleting { get; private set; } = false;
-    public bool IsSkeleton { get; } = false;
-    public bool IsLastLoadout { get; } = false;
+    public ILoadoutBadgeViewModel LoadoutBadgeViewModel { get; init; } = new LoadoutBadgeDesignViewModel();
+    public string LoadoutName { get; init; } = "Survival playthrough";
+    public IImage LoadoutImage { get; } = Bitmap.DecodeToWidth(AssetLoader.Open(new Uri("avares://NexusMods.App.UI/Assets/DesignTime/thumbnail.webp")), (int)ImageSizes.GameThumbnail.Width);
+    public bool IsLoadoutApplied { get; init; }
+    public string StatusText { get; init; } = "Changes waiting to apply";
+    public bool HasPendingChanges { get; init; } = true;
+    public string HumanizedLoadoutLastApplyTime { get; init; } = "Last applied: 2 days ago";
+    public string HumanizedLoadoutCreationTime { get; init; } = "Created 3 weeks ago";
+    public string LoadoutModCount { get; init; } = "276 mods";
+    public bool IsDeleting => false;
+    [Reactive] public bool IsBusy { get; set; }
+    public string BusyText { get; init; } = "Duplicating profile…";
+    public bool IsSkeleton => false;
+    public bool IsLastLoadout { get; init; }
     public ReactiveCommand<Unit, Unit> VisitLoadoutCommand { get; } = ReactiveCommand.Create(() => { });
     public ReactiveCommand<Unit, Unit> CloneLoadoutCommand { get; } = ReactiveCommand.Create(() => { });
+    public ReactiveCommand<Unit, Unit> RenameLoadoutCommand { get; } = ReactiveCommand.Create(() => { });
     public ReactiveCommand<Unit, Unit> DeleteLoadoutCommand { get; } = ReactiveCommand.Create(() => { });
 }

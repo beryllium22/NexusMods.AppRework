@@ -1,10 +1,10 @@
+using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Logging;
 using NexusMods.Abstractions.GuidedInstallers;
 using NexusMods.Abstractions.GuidedInstallers.ValueObjects;
 using NexusMods.Paths;
 using NexusMods.Sdk.Jobs;
 using NexusMods.Sdk.Library;
-using NexusMods.Sdk.Threading;
 using GroupId = NexusMods.Abstractions.GuidedInstallers.ValueObjects.GroupId;
 using Option = NexusMods.Abstractions.GuidedInstallers.Option;
 using OptionGroup = NexusMods.Abstractions.GuidedInstallers.OptionGroup;
@@ -54,167 +54,152 @@ public sealed class UiDelegates : FomodInstaller.Interface.ui.IUIDelegates, IDis
     private ContinueToNextStep _continueToNextStep = DummyContinueToNextStep;
     private CancelInstaller _cancelInstaller = DummyCancelInstaller;
 
-    private readonly SemaphoreSlim _semaphoreSlim = new(1, 1);
-    private readonly EventWaitHandle _waitHandle = new ManualResetEvent(initialState: false);
-    private long _taskWaitingState;
-
-    private const long Ready = 0;
-    private const long WaitingForCallback = 1;
+    private readonly object _gate = new();
+    private readonly CancellationTokenSource _lifetime;
+    private readonly CancellationToken _cancellationToken;
+    private readonly CancellationToken _externalCancellationToken;
+    private readonly bool _ownsGuidedInstaller;
+    private CancellationTokenRegistration _cancellationRegistration;
+    private TaskCompletionSource? _selectionUpdated;
+    private ExceptionDispatchInfo? _failure;
+    private bool _requestInProgress;
+    private int _dialogStarted;
+    private int _dialogEnded;
+    private int _cancelRequested;
+    private int _disposed;
 
     public IReadOnlyDictionary<RelativePath, LibraryArchiveFileEntry.ReadOnly>? CurrentFomodArchiveFiles;
 
-    public UiDelegates(
-        ILogger<UiDelegates> logger,
-        IGuidedInstaller guidedInstaller)
+    public UiDelegates(ILogger<UiDelegates> logger, IGuidedInstaller guidedInstaller,
+        CancellationToken cancellationToken = default, bool ownsGuidedInstaller = true)
     {
         _logger = logger;
         _guidedInstaller = guidedInstaller;
+        _externalCancellationToken = cancellationToken;
+        _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _cancellationToken = _lifetime.Token;
+        _ownsGuidedInstaller = ownsGuidedInstaller;
     }
 
-    public void StartDialog(
-        string? moduleName,
-        FomodInstaller.Interface.HeaderImage image,
-        Action<int, int, int[]> select,
-        Action<bool, int> cont,
-        Action cancel)
+    public void StartDialog(string? moduleName, FomodInstaller.Interface.HeaderImage image,
+        Action<int, int, int[]> select, Action<bool, int> cont, Action cancel)
     {
         _selectOptions = new SelectOptions(select);
         _continueToNextStep = new ContinueToNextStep(cont);
         _cancelInstaller = new CancelInstaller(cancel);
-
+        Interlocked.Exchange(ref _dialogStarted, 1);
         _guidedInstaller.SetupInstaller(moduleName ?? "FOMOD Installer");
+        _cancellationRegistration = _externalCancellationToken.Register(() =>
+            Abort(new OperationCanceledException(_externalCancellationToken)));
     }
 
     public void EndDialog()
     {
+        if (Interlocked.Exchange(ref _dialogEnded, 1) != 0) return;
+        _lifetime.Cancel();
         _selectOptions = DummySelectOptions;
         _continueToNextStep = DummyContinueToNextStep;
         _cancelInstaller = DummyCancelInstaller;
         CurrentFomodArchiveFiles = null;
-
-        _guidedInstaller.CleanupInstaller();
+        if (Volatile.Read(ref _dialogStarted) == 0) return;
+        try
+        {
+            _guidedInstaller.CleanupInstaller();
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Unable to close the FOMOD installer");
+        }
     }
 
-    public void ReportError(
-        string title,
-        string message,
-        string details)
+    public void ReportError(string title, string message, string details)
+        => _logger.LogError("Reporting an error: {Title}: {Message}\n{Details}", title, message, details);
+
+    /// <summary>Surfaces callback failures after the executor's cancellation has settled.</summary>
+    public void ThrowIfFailed() => _failure?.Throw();
+
+    private void Abort(Exception exception)
     {
-        _logger.LogError("Reporting an error: {Title}: {Message}\n{Details}", title, message, details);
+        if (Volatile.Read(ref _dialogEnded) != 0 || Interlocked.Exchange(ref _cancelRequested, 1) != 0) return;
+        _failure = ExceptionDispatchInfo.Capture(exception);
+        var cancel = _cancelInstaller;
+        EndDialog();
+        cancel();
     }
 
     public void UpdateState(FomodInstaller.Interface.ui.InstallerStep[] installSteps, int currentStepId)
     {
-        // NOTE(erri120): The FOMOD library we're using can send us stupid inputs.
-        if (currentStepId < 0 || currentStepId >= installSteps.Length) return;
-
-        // NOTE(erri120): This fuckery is explained further below when we call _selectOptions()
-        if (Interlocked.Read(ref _taskWaitingState) == WaitingForCallback)
+        if (Volatile.Read(ref _dialogEnded) != 0) return;
+        lock (_gate)
         {
-            if (!_waitHandle.Set())
+            // The library acknowledges each selection with another state callback. Wait for
+            // that callback before continuing, rather than relying on a 200ms timing window.
+            if (_selectionUpdated is not null)
             {
-                _logger.LogWarning("Unable to signal completion!");
+                _selectionUpdated.TrySetResult();
+                return;
             }
-
-            return;
+            if (_requestInProgress) return;
+            _requestInProgress = true;
         }
 
-        // NOTE(erri120): The FOMOD library we're using was designed for threading in JavaScript.
-        // A semaphore is required because the library can spawn multiple tasks on different threads
-        // that will call this method multiple times. This can lead to double-state and it's
-        // just a complete mess. This is what you get when you write a .NET library for JavaScript...
-        using var waiter = _semaphoreSlim.WaitDisposable(TimeSpan.Zero);
-        if (!waiter.HasEntered) return;
+        // HandleStepAsync observes every exception and cancels the executor on failure.
+        _ = HandleStepAsync(installSteps, currentStepId);
+    }
 
-        var groupIdMappings = new List<KeyValuePair<int, GroupId>>();
-        var optionIdMappings = new List<KeyValuePair<int, OptionId>>();
+    private async Task HandleStepAsync(FomodInstaller.Interface.ui.InstallerStep[] installSteps, int currentStepId)
+    {
+        try
+        {
+            if (currentStepId < 0 || currentStepId >= installSteps.Length)
+                throw new InvalidDataException("The FOMOD installer requested an invalid installation step.");
 
-        var guidedInstallationStep = ToGuidedInstallationStep(
-            installSteps,
-            currentStepId,
-            groupIdMappings,
-            optionIdMappings
-        );
+            var groupMappings = new List<KeyValuePair<int, GroupId>>();
+            var optionMappings = new List<KeyValuePair<int, OptionId>>();
+            var step = ToGuidedInstallationStep(installSteps, currentStepId, groupMappings, optionMappings);
+            var progress = Percent.Create(current: currentStepId + 1,
+                maximum: currentStepId + 1 + installSteps.Skip(currentStepId + 1).Count(candidate => candidate.visible) + 1);
+            var result = await _guidedInstaller.RequestUserChoice(step, progress, _cancellationToken)
+                .WaitAsync(_cancellationToken);
+            _cancellationToken.ThrowIfCancellationRequested();
 
-
-        // Progress is computed as currentIndex + 1 /(all steps before the current step + future visible steps + 1).
-        // The +1 are to avoid having the bar at 0% when we're at the first step, and to account for the extra finish screen.
-        var progress = Percent.Create(
-            current: currentStepId + 1,
-            maximum: currentStepId + 1 + installSteps.Skip(currentStepId + 1).Count(step => step.visible) + 1
-        );
-
-        _guidedInstaller
-            .RequestUserChoice(guidedInstallationStep, progress, CancellationToken.None)
-            .ContinueWith(task =>
+            if (result.IsCancelInstallation)
             {
-                var result = task.Result;
+                Abort(new OperationCanceledException("The FOMOD installation was cancelled."));
+                return;
+            }
 
-                if (result.IsCancelInstallation)
+            if (result.IsGoToNextStep)
+            {
+                // Send every group, including an empty choice. Otherwise the executor keeps
+                // recommended/default options that a collection preset explicitly omitted.
+                foreach (var (groupIndex, groupId) in groupMappings)
                 {
-                    _cancelInstaller();
-
-                    // NOTE(erri120): We have to manually call this method.
-                    EndDialog();
-                }
-                else if (result.IsGoToPreviousStep)
-                {
-                    _continueToNextStep(forward: false, currentStepId);
-                }
-                else if (result.IsGoToNextStep)
-                {
-                    var selectedOptions = result.AsT2.SelectedOptions;
-
-                    // NOTE(erri120): This _selectOptions delegate we got from the executor is
-                    // fucking weird. It only accepts the selected options from a single group.
-                    // Vortex: https://github.com/Nexus-Mods/Vortex/blob/82e8ad3e051ab4ad41df43d11803ee43d399a85f/src/extensions/installer_fomod/views/InstallerDialog.tsx#L450-L461
-                    // This is "supposed" to be called whenever the user clicks on a button in the UI.
-                    // However, this explicit relationship doesn't work in our case and is generally
-                    // pretty stupid. As such, we get the "final" result from the implementation
-                    // and push those all at once to the executor.
-
-                    var groupings = selectedOptions.GroupBy(x => x.GroupId);
-
-                    foreach (var grouping in groupings)
+                    _cancellationToken.ThrowIfCancellationRequested();
+                    var selected = result.AsT2.SelectedOptions.Where(option => option.GroupId == groupId)
+                        .Select(option => optionMappings.First(mapping => mapping.Value == option.OptionId).Key).ToArray();
+                    var acknowledgement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    lock (_gate) _selectionUpdated = acknowledgement;
+                    try
                     {
-                        var selectedGroupId = groupIdMappings.First(kv => kv.Value == grouping.Key).Key;
-                        var selectedOptionIds = grouping
-                            .Select(x => optionIdMappings.FirstOrDefault(kv => kv.Value == x.OptionId).Key)
-                            .ToArray();
-
-                        // NOTE(erri120): Once again, the FOMOD library we're using is complete ass and expects
-                        // to be used in a JavaScript environment. However, this isn't JavaScript this is C#.
-                        // When calling _selectOptions, the library spawns a new Task that runs in the background.
-                        // This means that after calling _selectOptions, the state hasn't been updated YET.
-                        // Inside _selectOptions, the library wants to get the next step, however, if we
-                        // call _continueToNextStep, then the next step variable has already been updated.
-                        // The library doesn't do any checks to prevent this and can throw an exception
-                        // if we're at the last step and continue. In that case, the step variable will be set to -1
-                        // and steps[-1] will throw an exception.
-                        // As such, we're required to use our own synchronization. Thankfully, we can abuse the stupid
-                        // behavior of the library. As explained earlier, the library expects us to call _selectOptions
-                        // when the user clicks on a button. The method _selectOptions will call us back, once it has
-                        // updated its internal state. This behavior allows us to use an EventWaitHandle to "wait" for
-                        // the library to call us back.
-                        // We're also using CAS to set our state into "waiting" mode.
-                        if (Interlocked.CompareExchange(ref _taskWaitingState, WaitingForCallback, Ready) != Ready)
-                            _logger.LogWarning("Unable to CAS!");
-
-                        _selectOptions(currentStepId, selectedGroupId, selectedOptionIds);
-                        _waitHandle.WaitOne(TimeSpan.FromMilliseconds(200), exitContext: false);
-                        _waitHandle.Reset();
-
-                        if (Interlocked.CompareExchange(ref _taskWaitingState, Ready, WaitingForCallback) !=
-                            WaitingForCallback)
-                            _logger.LogWarning("Unable to CAS!");
+                        _selectOptions(currentStepId, groupIndex, selected);
+                        await acknowledgement.Task.WaitAsync(TimeSpan.FromSeconds(30), _cancellationToken);
                     }
-
-                    // NOTE(erri120): We need to explicitly call this, since our implementations
-                    // return from RequestMultipleChoices when the user wants to go
-                    // to the next step. Once again, the API is ass.
-                    _continueToNextStep(forward: true, currentStepId);
+                    finally
+                    {
+                        lock (_gate) _selectionUpdated = null;
+                    }
                 }
-            });
+            }
+
+            _cancellationToken.ThrowIfCancellationRequested();
+            lock (_gate) _requestInProgress = false;
+            _continueToNextStep(forward: result.IsGoToNextStep, currentStepId);
+        }
+        catch (Exception exception)
+        {
+            Abort(exception);
+        }
     }
 
     private GuidedInstallationStep ToGuidedInstallationStep(
@@ -237,7 +222,7 @@ public sealed class UiDelegates : FomodInstaller.Interface.ui.IUIDelegates, IDis
                 Id = groupId,
                 Type = groupType,
                 Name = group.name,
-                Options = ToOptions(group.options, optionIdMappings, groupType).ToArray(),
+                Options = ToOptions(group.options, optionIdMappings, groupType, group.type == "SelectAll").ToArray(),
             };
         });
 
@@ -254,7 +239,7 @@ public sealed class UiDelegates : FomodInstaller.Interface.ui.IUIDelegates, IDis
     private IEnumerable<Option> ToOptions(
         IReadOnlyCollection<FomodInstaller.Interface.ui.Option> options,
         ICollection<KeyValuePair<int, OptionId>> optionIdMappings,
-        OptionGroupType optionGroupType)
+        OptionGroupType optionGroupType, bool selectAll)
     {
         return options.Select(option =>
         {
@@ -266,7 +251,7 @@ public sealed class UiDelegates : FomodInstaller.Interface.ui.IUIDelegates, IDis
             // NOTE(erri120): If the group only contains a single option that is required by the group type,
             // the option type should be set to required. Some authors and FOMOD builders aren't doing this
             // automatically, so we have to change the type to required afterwards.
-            if (options.Count == 1 && optionGroupType is OptionGroupType.ExactlyOne or OptionGroupType.AtLeastOne)
+            if (optionType != OptionType.Disabled && (selectAll || options.Count == 1 && optionGroupType is (OptionGroupType.ExactlyOne or OptionGroupType.AtLeastOne)))
             {
                 optionType = OptionType.Required;
             }
@@ -326,8 +311,10 @@ public sealed class UiDelegates : FomodInstaller.Interface.ui.IUIDelegates, IDis
 
     public void Dispose()
     {
-        _guidedInstaller.Dispose();
-        _semaphoreSlim.Dispose();
-        _waitHandle.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _cancellationRegistration.Dispose();
+        EndDialog();
+        if (_ownsGuidedInstaller) _guidedInstaller.Dispose();
+        _lifetime.Dispose();
     }
 }

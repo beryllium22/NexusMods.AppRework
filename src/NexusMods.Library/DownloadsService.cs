@@ -80,9 +80,9 @@ public sealed class DownloadsService : IDownloadsService, IDisposable
                                     if (existingItem.HasValue)
                                     {
                                         var completedDownload = existingItem.Value;
-                                        MarkJobAsCompleted(completedDownload);
                                         // Clean up observable subscriptions
                                         completedDownload.Subscriptions?.Dispose();
+                                        MarkJobAsCompleted(completedDownload);
                                     }
                                 }
                                 else
@@ -263,7 +263,10 @@ public sealed class DownloadsService : IDownloadsService, IDisposable
         // Set completion timestamp
         downloadInfo.SetCompletedAt(DateTimeOffset.UtcNow);
         
-        // Keep Progress at 100% and other completed state
+        // Parent completion is authoritative even if the child's final notification
+        // did not reach this cache before its subscriptions were detached.
+        downloadInfo.SetProgress(Percent.One);
+        downloadInfo.SetStatus(JobStatus.Completed);
     }
 
     // Helper methods

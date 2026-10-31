@@ -128,14 +128,13 @@ public class TestDownloadJobContext
     public ManualResetEventSlim? StartSignal { get; init; }
 
     /// <summary>
-    /// Simulates job completion
+    /// Simulates the real parent waiting for the HTTP download to complete.
     /// </summary>
-    public void CompleteJob()
+    public async Task CompleteJobAsync()
     {
-        StatusController.OnNext(JobStatus.Completed);
-        ProgressController.OnNext(1.0);
-        CompletionSource.TrySetResult(NexusJob.Destination);
         HttpCompletionSource.TrySetResult(HttpJob.Destination);
+        await HttpJobTask;
+        CompletionSource.TrySetResult(NexusJob.Destination);
     }
     
     /// <summary>

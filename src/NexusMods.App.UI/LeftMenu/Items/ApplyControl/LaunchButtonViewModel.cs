@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reactive;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
+using Avalonia.Threading;
 using Microsoft.Extensions.Logging;
 using NexusMods.Abstractions.Games;
 using NexusMods.Abstractions.Loadouts;
@@ -49,7 +50,7 @@ public class LaunchButtonViewModel : AViewModel<ILaunchButtonViewModel>, ILaunch
         
         this.WhenActivated(cd =>
         {
-            _gameRunningTracker.GetWithCurrentStateAsStarting().Subscribe(isRunning =>
+            _gameRunningTracker.GetWithCurrentStateAsStarting().OnUI().Subscribe(isRunning =>
             {
                 if (isRunning)
                     SetLabelToRunning();
@@ -63,11 +64,16 @@ public class LaunchButtonViewModel : AViewModel<ILaunchButtonViewModel>, ILaunch
 
     private async Task LaunchGame(CancellationToken token)
     {
-        var marker = Sdk.Loadouts.Loadout.Load(_conn.Db, LoadoutId);
-        SetLabelToRunning();
+        var marker = default(Sdk.Loadouts.Loadout.ReadOnly);
+        await Dispatcher.UIThread.InvokeAsync(SetLabelToRunning);
         try
         {
-            var tool = _toolManager.GetTools(marker).OfType<IRunGameTool>().First();
+            token.ThrowIfCancellationRequested();
+            marker = Sdk.Loadouts.Loadout.Load(_conn.Db, LoadoutId);
+            if (!marker.IsValid()) throw new InvalidOperationException("This loadout is no longer available. Select an existing loadout and try again.");
+
+            var tool = _toolManager.GetTools(marker).OfType<IRunGameTool>().FirstOrDefault()
+                ?? throw new InvalidOperationException("No launch tool is available for this game.");
             await Task.Run(async () =>
             {
                 var installation = marker.InstallationInstance;
@@ -88,11 +94,19 @@ public class LaunchButtonViewModel : AViewModel<ILaunchButtonViewModel>, ILaunch
         {
             await MessageBoxOkViewModel.ShowGameAlreadyRunningError(_serviceProvider, marker.Installation.Name);
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogDebug("Game launch was cancelled");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error launching game");
+            await MessageBoxOkViewModel.Show(_serviceProvider, "Could not launch the game", ex.Message);
         }
-        SetLabelToLaunch();
+        finally
+        {
+            await Dispatcher.UIThread.InvokeAsync(SetLabelToLaunch);
+        }
     }
     private void SetLabelToRunning() => Label = Language.LaunchButtonViewModel_LaunchGame_RUNNING;
     private void SetLabelToLaunch() => Label = Language.LaunchButtonViewModel_LaunchGame_LAUNCH;

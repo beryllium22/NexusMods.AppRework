@@ -211,15 +211,15 @@ The official REDmod DLC is a mod loader required to use some mods for Cyberpunk 
 
 ### How to Resolve
 1. Install the REDmod DLC - View in {RedmodLink} or the {GenericLink}.
-2. Apply a loadout with REDmod installed or restart the app.
+2. Apply the loadout again after installing REDmod.
 
 OR
 
-1. Remove any mods requring REDmod from Installed Mods.
-2. Remove any subfolders of `{RedModFolder}` from External Changes.
+1. Disable or remove the enabled REDmods from this loadout.
+2. Apply the updated loadout.
 
 ### Technical Details 
-Each subfolder in the `{RedModFolder}` represents an installed mod. If any folders are present, REDmod is required. 
+Enabled mods with a winning `mods/<mod name>/info.json` manifest require REDmod, including mods that have not been applied to `{RedModFolder}` yet. Disabled mods and unrelated folders do not require deployment.
 
 After finding {ModCount} mod(s), the REDmod DLC was checked for installation by verifying that `{RedModEXE}` exists.
 

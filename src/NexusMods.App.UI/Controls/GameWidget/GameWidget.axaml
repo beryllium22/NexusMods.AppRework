@@ -105,6 +105,12 @@
             
             <!-- details -->
             <StackPanel Grid.Row="2"  x:Name="DetailsSectionStackPanel" Margin="0 8 0 0">
+                <Border x:Name="ExperimentalBadge" HorizontalAlignment="Left" Padding="6,2"
+                        BorderBrush="{StaticResource StrokeTranslucentWeakBrush}" BorderThickness="1"
+                        CornerRadius="4" Margin="0,0,0,6"
+                        ToolTip.Tip="This game integration is still in development. Some mods and game versions may not work.">
+                    <TextBlock Text="Experimental" Foreground="{StaticResource NeutralModerateBrush}" />
+                </Border>
                 <TextBlock
                     VerticalAlignment="Center"
                     HorizontalAlignment="Left"

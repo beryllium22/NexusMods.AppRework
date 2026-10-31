@@ -88,7 +88,7 @@ public class SkyrimSE : ICreationEngineGame, IGameData<SkyrimSE>
         return new Dictionary<LocationId, AbsolutePath>()
         {
             { LocationId.Game, gameLocatorResult.Path },
-            { LocationId.AppData, fileSystem.GetKnownPath(KnownPath.LocalApplicationDataDirectory) / "Skyrim Special Edition" },
+            { LocationId.AppData, fileSystem.GetKnownPath(KnownPath.LocalApplicationDataDirectory) / ("Skyrim Special Edition" + postfix) },
             { LocationId.Preferences, fileSystem.GetKnownPath(KnownPath.MyGamesDirectory) / ("Skyrim Special Edition" + postfix)},
         }.ToImmutableDictionary();
     }
@@ -101,11 +101,29 @@ public class SkyrimSE : ICreationEngineGame, IGameData<SkyrimSE>
         var fileName = name?.FileName.ToString() ?? "unknown.esm";
         var key = ModKey.FromFileName(fileName);
         await using var stream = await _streamSource.OpenAsync(hash);
-        var meta = ParsingMeta.Factory(BinaryReadParameters.Default, GameRelease.SkyrimSE, key, stream!);
-        await using var mutagenStream = new MutagenBinaryReadStream(stream!, meta);
+        if (stream is null)
+            throw new FileNotFoundException($"The archived contents of {fileName} could not be found.");
+        return ParsePluginHeader(stream, key);
+    }
+
+    public ValueTask<IMod?> ParsePlugin(AbsolutePath path)
+    {
+        using var stream = path.Read();
+        return ValueTask.FromResult<IMod?>(ParsePluginHeader(stream, ModKey.FromFileName(path.Name.ToString())));
+    }
+
+    private static IMod ParsePluginHeader(Stream stream, ModKey key)
+    {
+        var meta = ParsingMeta.Factory(BinaryReadParameters.Default, GameRelease.SkyrimSE, key, stream);
+        using var mutagenStream = new MutagenBinaryReadStream(stream, meta);
         using var frame = new MutagenFrame(mutagenStream);
         return SkyrimMod.CreateFromBinary(frame, SkyrimRelease.SkyrimSE, EmptyGroupMask);
     }
 
     public GamePath PluginsFile => new(LocationId.AppData, "Plugins.txt");
+
+    public IReadOnlyList<ModKey> OfficialPlugins { get; } = new[]
+    {
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm",
+    }.Select(file => ModKey.FromFileName(file)).ToArray();
 }

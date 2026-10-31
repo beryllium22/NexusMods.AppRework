@@ -1,80 +1,79 @@
-<reactiveUi:ReactiveUserControl x:TypeArguments="myLoadouts:IMyLoadoutsViewModel" xmlns="https://github.com/avaloniaui"
-                                xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                                xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-                                xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-                                xmlns:reactiveUi="http://reactiveui.net"
-                                xmlns:myLoadouts="clr-namespace:NexusMods.App.UI.Pages.MyLoadouts"
-                                xmlns:panels="clr-namespace:Avalonia.Labs.Panels;assembly=Avalonia.Labs.Panels"
-                                xmlns:gameLoadoutsSectionEntry="clr-namespace:NexusMods.App.UI.Pages.MyLoadouts.GameLoadoutsSectionEntry"
-                                xmlns:resources="clr-namespace:NexusMods.App.UI.Resources"
-                                xmlns:controls="clr-namespace:NexusMods.App.UI.Controls"
-                                xmlns:icons="clr-namespace:NexusMods.UI.Sdk.Icons;assembly=NexusMods.UI.Sdk"
-                                xmlns:pageHeader="clr-namespace:NexusMods.App.UI.Controls.PageHeader"
-                                xmlns:sdk="clr-namespace:NexusMods.UI.Sdk;assembly=NexusMods.UI.Sdk"
-                                mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
-                                x:Class="NexusMods.App.UI.Pages.MyLoadouts.MyLoadoutsView">
-    <Design.DataContext>
-        <myLoadouts:MyLoadoutsDesignViewModel />
-    </Design.DataContext>
-
-
+<reactiveUi:ReactiveUserControl x:TypeArguments="myLoadouts:IMyLoadoutsViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:reactiveUi="http://reactiveui.net"
+    xmlns:myLoadouts="clr-namespace:NexusMods.App.UI.Pages.MyLoadouts"
+    xmlns:panels="clr-namespace:Avalonia.Labs.Panels;assembly=Avalonia.Labs.Panels"
+    xmlns:sections="clr-namespace:NexusMods.App.UI.Pages.MyLoadouts.GameLoadoutsSectionEntry"
+    xmlns:resources="clr-namespace:NexusMods.App.UI.Resources"
+    xmlns:controls="clr-namespace:NexusMods.App.UI.Controls"
+    xmlns:icons="clr-namespace:NexusMods.UI.Sdk.Icons;assembly=NexusMods.UI.Sdk"
+    xmlns:pageHeader="clr-namespace:NexusMods.App.UI.Controls.PageHeader"
+    xmlns:sdk="clr-namespace:NexusMods.UI.Sdk;assembly=NexusMods.UI.Sdk"
+    mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="760"
+    x:Class="NexusMods.App.UI.Pages.MyLoadouts.MyLoadoutsView">
+    <Design.DataContext><myLoadouts:MyLoadoutsDesignViewModel /></Design.DataContext>
     <ScrollViewer>
-
-        
-
-            <StackPanel Margin="24"
-                        Orientation="Vertical"
-                        Spacing="24">
-
-                <pageHeader:PageHeader 
-                    Title="My Loadouts"
-                    Description="{x:Static resources:Language.MyLoadoutsPageDescriptionText}"
-                    Icon="{x:Static icons:IconValues.PictogramBox2}"/> 
-                
-                <controls:EmptyState x:Name="MyLoadoutsEmptyState"
-                                     Header="{x:Static resources:Language.MyLoadoutsEmptyState_Header}"
-                                     Subtitle="{x:Static resources:Language.MyLoadoutsEmptyState_Subtitle}">
-
-                <ItemsControl x:Name="GameSectionsItemsControl">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <panels:FlexPanel x:Name="GameSectionsItemsFlexPanel" />
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate DataType="gameLoadoutsSectionEntry:IGameLoadoutsSectionEntryViewModel">
-                            <Border x:Name="GameSectionBorder">
-                                <panels:FlexPanel x:Name="GameSectionFlexPanel">
-
-                                    <panels:FlexPanel x:Name="HeadingSectionFlexPanel">
-                                        <TextBlock x:Name="GameHeadingTextBlock"
-                                                   Text="{CompiledBinding HeadingText}" />
-                                    </panels:FlexPanel>
-
-                                    <ItemsControl x:Name="LoadoutCardsItemsControl"
-                                                  ItemsSource="{CompiledBinding CardViewModels}">
-                                        <ItemsControl.ItemsPanel>
-                                            <ItemsPanelTemplate>
-                                                <panels:FlexPanel x:Name="CardsFlexPanel" />
-                                            </ItemsPanelTemplate>
-                                        </ItemsControl.ItemsPanel>
-
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate DataType="sdk:IViewModelInterface">
-                                                <reactiveUi:ViewModelViewHost ViewModel="{CompiledBinding}"
-                                                                              ClipToBounds="False" />
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-
-                                    </ItemsControl>
-
-                                </panels:FlexPanel>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                </controls:EmptyState>
-            </StackPanel>
+        <StackPanel Margin="24" Spacing="24">
+            <pageHeader:PageHeader Title="{x:Static resources:Language.MyLoadoutsPageTitle}"
+                Description="{x:Static resources:Language.MyLoadoutsPageDescriptionText}"
+                Icon="{x:Static icons:IconValues.PictogramBox2}" />
+            <Border x:Name="ProfilesToolbar" Background="{StaticResource SurfaceMidBrush}"
+                    BorderBrush="{StaticResource StrokeTranslucentWeakBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <WrapPanel Orientation="Horizontal">
+                        <TextBox x:Name="ProfileSearchTextBox" Width="260" Watermark="Search profiles or games" Margin="0,0,12,8" />
+                        <ComboBox x:Name="ProfileSortComboBox" Width="170" SelectedIndex="0" Margin="0,0,12,8"
+                                  ToolTip.Tip="Sort profiles">
+                            <ComboBoxItem Content="Recently created" />
+                            <ComboBoxItem Content="Name: A–Z" />
+                            <ComboBoxItem Content="Applied first" />
+                        </ComboBox>
+                        <CheckBox x:Name="OnlyAppliedCheckBox" Content="Applied only" Margin="0,0,12,8" VerticalAlignment="Center" />
+                        <controls:StandardButton x:Name="ClearFiltersButton" Text="Clear filters" Size="Small" Margin="0,0,0,8" />
+                    </WrapPanel>
+                    <TextBlock x:Name="ProfileSummaryTextBlock" Foreground="{StaticResource NeutralSubduedBrush}" />
+                </StackPanel>
+            </Border>
+            <controls:EmptyState x:Name="MyLoadoutsEmptyState"
+                Header="{x:Static resources:Language.MyLoadoutsEmptyState_Header}"
+                Subtitle="{x:Static resources:Language.MyLoadoutsEmptyState_Subtitle}">
+                <StackPanel Spacing="20">
+                    <Border x:Name="NoMatchingProfilesPanel" IsVisible="False" Padding="24"
+                            Background="{StaticResource SurfaceMidBrush}" CornerRadius="8">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="No matching profiles" Theme="{StaticResource BodyMDSemiTheme}" />
+                            <TextBlock Text="Try a different name, or clear the filters to see all your profiles."
+                                       Foreground="{StaticResource NeutralSubduedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                    <ItemsControl x:Name="GameSectionsItemsControl">
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="24" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="sections:IGameLoadoutsSectionEntryViewModel">
+                                <Border x:Name="GameSectionBorder" IsVisible="{CompiledBinding IsVisible}">
+                                    <StackPanel Spacing="16">
+                                        <StackPanel Spacing="4">
+                                            <TextBlock x:Name="GameHeadingTextBlock" Text="{CompiledBinding HeadingText}" />
+                                            <TextBlock Text="{CompiledBinding InstallationText}" TextTrimming="CharacterEllipsis"
+                                                       Foreground="{StaticResource NeutralSubduedBrush}" FontSize="12"
+                                                       ToolTip.Tip="{CompiledBinding InstallationText}" />
+                                        </StackPanel>
+                                        <ItemsControl x:Name="LoadoutCardsItemsControl" ItemsSource="{CompiledBinding CardViewModels}">
+                                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><panels:FlexPanel x:Name="CardsFlexPanel" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate><DataTemplate DataType="sdk:IViewModelInterface">
+                                                <reactiveUi:ViewModelViewHost ViewModel="{CompiledBinding}" ClipToBounds="False" />
+                                            </DataTemplate></ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </controls:EmptyState>
+        </StackPanel>
     </ScrollViewer>
 </reactiveUi:ReactiveUserControl>

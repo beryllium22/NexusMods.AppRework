@@ -5,7 +5,6 @@
         <WarningsAsErrors>Nullable</WarningsAsErrors>
     </PropertyGroup>
 
-    <ItemGroup>
-        <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
-    </ItemGroup>
+    <!-- GitHub Source Link is included in the SDK. Do not override its serviced
+         build tasks with the older standalone 8.0.0 package. -->
 </Project>

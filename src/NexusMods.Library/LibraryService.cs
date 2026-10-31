@@ -185,9 +185,9 @@ public sealed class LibraryService : ILibraryService
                 {
                     if (options.IgnoreReadOnlyCollections)
                     {
-                        var collection = tuple.linkedItem.AsLoadoutItem().Parent;
-                        var asCollectionGroup = collection.ToCollectionGroup();
-                        return !asCollectionGroup.IsReadOnly;
+                        return !tuple.linkedItem.AsLoadoutItem().GetThisAndParents().Any(item =>
+                            item.TryGetAsLoadoutItemGroup(out var group) &&
+                            group.TryGetAsCollectionGroup(out var collection) && collection.IsReadOnly);
                     }
 
                     return true;

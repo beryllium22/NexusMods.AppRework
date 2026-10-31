@@ -46,6 +46,7 @@ public class MiniGameWidgetViewModel : AViewModel<IMiniGameWidgetViewModel>, IMi
     public GameInstallation[]? GameInstallations { get; set; }
     [Reactive] public string Name { get; set; } = "";
     public bool IsFound { get; set; }
+    [Reactive] public bool IsExperimental { get; set; }
     public Bitmap Image => _image.Value;
     public ReactiveUI.ReactiveCommand<System.Reactive.Unit, System.Reactive.Unit> GiveFeedbackCommand { get; }
 

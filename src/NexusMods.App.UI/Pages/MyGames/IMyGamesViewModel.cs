@@ -12,6 +12,7 @@ namespace NexusMods.App.UI.Pages.MyGames;
 public interface IMyGamesViewModel : IPageViewModelInterface
 {
     public ReactiveCommand<Unit, Unit> OpenRoadmapCommand { get; }
+    public bool ShowExperimentalGames { get; set; }
     
     public ReadOnlyObservableCollection<IGameWidgetViewModel> InstalledGames { get; }
     

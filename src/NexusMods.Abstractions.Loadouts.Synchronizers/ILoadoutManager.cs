@@ -26,9 +26,13 @@ public interface ILoadoutManager
     IJobTask<CreateLoadoutJob, Loadout.ReadOnly> CreateLoadout(GameInstallation installation, string? suggestedName = null);
 
     /// <summary>
-    /// Copies a loadout.
+    /// Copies a loadout, its collections, conflict priorities and game load orders.
+    /// The copy starts unapplied and shares only immutable library/game data with its source.
     /// </summary>
-    ValueTask<Loadout.ReadOnly> CopyLoadout(LoadoutId loadoutId, CancellationToken cancellationToken = default);
+    ValueTask<Loadout.ReadOnly> CopyLoadout(LoadoutId loadoutId, CancellationToken cancellationToken = default, string? suggestedName = null);
+
+    /// <summary>Renames a visible loadout without changing its contents or applied state.</summary>
+    ValueTask RenameLoadout(LoadoutId loadoutId, string name, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes the loadout for the game. If the loadout is the currently active loadout,
@@ -102,7 +106,8 @@ public interface ILoadoutManager
     ValueTask ApplyCollectionDownloadRules(NexusCollectionLoadoutGroupId collectionId);
 
     /// <summary>
-    /// Removes all groups and installs the new library item.
+    /// Replaces each group with an installation of the new library item, preserving
+    /// its parent, disabled setting, and conflict priority.
     /// </summary>
     ValueTask ReplaceItems(LoadoutId loadoutId, LoadoutItemGroupId[] groupsToRemove, LibraryItem.ReadOnly libraryItemToInstall);
 

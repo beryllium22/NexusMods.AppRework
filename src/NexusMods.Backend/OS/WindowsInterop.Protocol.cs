@@ -11,7 +11,10 @@ internal partial class WindowsInterop
 
     public ValueTask RegisterUriSchemeHandler(string scheme, bool setAsDefaultHandler = true, CancellationToken cancellationToken = default)
     {
-        if (!IsWindows()) return ValueTask.CompletedTask;
+        // This implementation writes a generic ProgID, which replaces the current handler.
+        // A caller that only wants to offer an alternative must not change that association.
+        if (!IsWindows() || !setAsDefaultHandler) return ValueTask.CompletedTask;
+        cancellationToken.ThrowIfCancellationRequested();
 
         // NOTE(erri120): See this comment for an in-depth guide on protocol handlers:
         // https://github.com/Nexus-Mods/NexusMods.App/pull/1691#issuecomment-2194418849

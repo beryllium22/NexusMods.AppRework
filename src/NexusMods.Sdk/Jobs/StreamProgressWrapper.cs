@@ -30,11 +30,13 @@ public sealed class StreamProgressWrapper<TState> : Stream
         _period = period == default(TimeSpan) ? TimeSpan.FromSeconds(1) : period;
         timeProvider ??= TimeProvider.System;
 
-        _timer = timeProvider.CreateTimer(NotifyLoop, state: this, dueTime: TimeSpan.Zero, period: _period);
-        
         var pos = Size.FromLong(_innerStream.Position);
         _currentBytesWritten = pos;
         _lastBytesWritten = pos;
+
+        // A zero-due-time timer can run before CreateTimer returns. Initialize the offset
+        // first so the initial notification cannot erase a resumed download's progress.
+        _timer = timeProvider.CreateTimer(NotifyLoop, state: this, dueTime: TimeSpan.Zero, period: _period);
     }
 
     private readonly TimeSpan _period;

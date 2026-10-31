@@ -14,7 +14,9 @@ public static class Services
     public static IServiceCollection AddGames(this IServiceCollection services)
     {
         return services
-            .AddSingleton<SortOrderManager>()
+            // Each game's lazy initializer retains its own manager and varieties. A shared
+            // singleton lets opening another game replace existing subscriptions and orders.
+            .AddTransient<SortOrderManager>()
             .AddSortOrderItemModel()
             .AddSortOrderQueriesSql()
             .AddLoadoutItemGroupPriorityModel();

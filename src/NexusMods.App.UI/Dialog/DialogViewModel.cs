@@ -2,6 +2,7 @@ using System.ComponentModel;
 using NexusMods.App.UI.Dialog.Enums;
 using NexusMods.UI.Sdk;
 using NexusMods.UI.Sdk.Dialog;
+using NexusMods.UI.Sdk.Dialog.Enums;
 using ReactiveUI;
 
 namespace NexusMods.App.UI.Dialog;
@@ -29,7 +30,10 @@ public class DialogViewModel: IDialogViewModel
         
         ButtonPressCommand = new R3.ReactiveCommand<ButtonDefinitionId, ButtonDefinitionId>(id =>
             {
-                Console.WriteLine(id);
+                if (buttonsDefinitions.Any(button => button.Id == id && button.ButtonAction == ButtonAction.Accept)
+                    && contentViewModel is IDialogStandardContentViewModel { IsInputValid: false })
+                    return ButtonDefinitionId.None;
+
                 Result = new StandardDialogResult
                 {
                     ButtonId = id,

@@ -14,6 +14,8 @@
         <PackageReference Include="OneOf" />
         <PackageReference Include="Polly.Core" />
         <PackageReference Include="R3" />
+        <!-- Keep legacy RID dependencies on a patched URI package; .NET 9 supplies the runtime implementation. -->
+        <PackageReference Include="System.Private.Uri" />
         <PackageReference Include="TransparentValueObjects" PrivateAssets="all" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
         <PackageReference Include="TransparentValueObjects.Abstractions" />
     </ItemGroup>

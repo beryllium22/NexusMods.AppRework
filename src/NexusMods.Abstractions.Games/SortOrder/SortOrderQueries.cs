@@ -1,6 +1,7 @@
 using DynamicData;
 using NexusMods.MnemonicDB.Abstractions;
 using NexusMods.Sdk.NexusModsApi;
+using NexusMods.Sdk.Reactive;
 
 namespace NexusMods.Abstractions.Games;
 
@@ -16,6 +17,6 @@ public static class SortOrderQueries
                                                  SELECT * FROM sortorder.TrackLoadoutItemChanges({connection}, {nexusModsGameId.Value})
                                                  """
             )
-            .Observe(x => x.ItemId);
+            .ObserveOwned(x => x.ItemId);
     }
 }

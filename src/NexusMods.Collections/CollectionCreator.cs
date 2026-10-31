@@ -16,6 +16,7 @@ using NexusMods.Abstractions.NexusWebApi;
 using NexusMods.Abstractions.NexusWebApi.Types;
 using NexusMods.Hashing.xxHash3;
 using NexusMods.MnemonicDB.Abstractions;
+using NexusMods.MnemonicDB.Abstractions.TxFunctions;
 using NexusMods.Networking.NexusWebApi;
 using NexusMods.Networking.NexusWebApi.Errors;
 using NexusMods.Paths;
@@ -44,6 +45,71 @@ public static class CollectionCreator
 
         collection = group.Collection;
         return true;
+    }
+
+    /// <summary>
+    /// Refreshes the published revision of an uploaded collection and persists it for every view
+    /// of that collection. Failed or cancelled requests leave the cached state unchanged.
+    /// </summary>
+    public static async ValueTask RefreshPublishedRevision(
+        IServiceProvider serviceProvider,
+        ManagedCollectionLoadoutGroupId groupId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var connection = serviceProvider.GetRequiredService<IConnection>();
+        var group = ManagedCollectionLoadoutGroup.Load(connection.Db, groupId);
+        if (!group.IsValid()) return;
+
+        var nexusModsLibrary = serviceProvider.GetRequiredService<NexusModsLibrary>();
+        var result = await nexusModsLibrary.GetLastPublishedRevisionNumber(group.Collection, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!result.TryGetData(out var publishedRevision))
+        {
+            var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(CollectionCreator));
+            logger.LogWarning("Could not refresh the published revision of collection {Slug}: the API returned {ErrorCount} errors", group.Collection.Slug, result.Errors.Length);
+            return;
+        }
+
+        // The group may have been removed, relinked, or published locally while the request
+        // was in flight. Do not restore removed state or overwrite a newer local publication.
+        var currentGroup = ManagedCollectionLoadoutGroup.Load(connection.Db, groupId);
+        if (!currentGroup.IsValid() || currentGroup.CollectionId != group.CollectionId
+            || !currentGroup.LastPublishedRevisionNumber.Equals(group.LastPublishedRevisionNumber)
+            || currentGroup.LastPublishedRevisionNumber.Equals(publishedRevision))
+            return;
+
+        using var tx = connection.BeginTransaction();
+        tx.Add(new RefreshPublishedRevisionTxFunc(group, publishedRevision));
+
+        // Commit has no cancellation overload. Once started, let the atomic write finish.
+        cancellationToken.ThrowIfCancellationRequested();
+        await tx.Commit();
+    }
+
+    private sealed record RefreshPublishedRevisionTxFunc(
+        ManagedCollectionLoadoutGroup.ReadOnly Original,
+        Optional<RevisionNumber> PublishedRevision) : ITxFunction
+    {
+        public bool Equals(ITxFunction? other) => other is RefreshPublishedRevisionTxFunc function && Equals(function);
+
+        public void Apply(ITransaction tx, IDb basis)
+        {
+            // Check again against the serialized transaction basis so a deletion or a local
+            // publication between the refresh and commit cannot be overwritten either.
+            var group = ManagedCollectionLoadoutGroup.Load(basis, Original.Id);
+            if (!group.IsValid() || group.CollectionId != Original.CollectionId
+                || !group.LastPublishedRevisionNumber.Equals(Original.LastPublishedRevisionNumber)
+                || group.LastPublishedRevisionNumber.Equals(PublishedRevision))
+                return;
+
+            if (PublishedRevision.HasValue)
+                tx.Add(group.Id, ManagedCollectionLoadoutGroup.LastPublishedRevisionNumber, PublishedRevision.Value);
+            else if (group.LastPublishedRevisionNumber.HasValue)
+                tx.Retract(group.Id, ManagedCollectionLoadoutGroup.LastPublishedRevisionNumber, group.LastPublishedRevisionNumber.Value);
+        }
     }
 
     private static string GenerateNewCollectionName(string[] allNames)

@@ -703,31 +703,31 @@
         <comment>Where {0} is a humanized time (e.g. "Last applied 2 hours ago")</comment>
     </data>
     <data name="LoadoutCardViewModel_FormatNumMods_Mods__0_" xml:space="preserve">
-        <value>Mods {0}</value>
+        <value>{0} mods</value>
         <comment>Where {0} is the number of mods in a loadout</comment>
     </data>
     <data name="MyLoadoutsPageTitle" xml:space="preserve">
-        <value>My Loadouts</value>
+        <value>Profiles</value>
     </data>
     <data name="MyLoadoutsPageDescriptionText" xml:space="preserve">
-        <value>Create game Loadouts which contain their own individual mod preferences and settings. Switch between Loadouts and apply the one you want to play.</value>
+        <value>Keep a different mod setup for each playthrough. Open a profile to manage its mods, then apply it when you are ready to play.</value>
     </data>
     <data name="SettingsView_Description" xml:space="preserve">
         <value>Manage your preferences.</value>
     </data>
 
     <data name="MyLoadoutsGameSectionHeading" xml:space="preserve">
-        <value>{0} Loadouts</value>
+        <value>{0} profiles</value>
         <comment>Where {0} is the name of the game</comment>
     </data>
     <data name="CreateNewLoadoutCarViewTexBlock" xml:space="preserve">
-        <value>Create new</value>
+        <value>Create profile</value>
     </data>
     <data name="LoadoutCardViewCurrentlyAppliedTextBlock" xml:space="preserve">
         <value>Currently Applied</value>
     </data>
     <data name="LoadoutCardViewCreateCopyButton" xml:space="preserve">
-        <value>Create Copy</value>
+        <value>Duplicate</value>
     </data>
     <data name="LoadoutCardViewDeletingText" xml:space="preserve">
         <value>Deleting...</value>
@@ -736,10 +736,10 @@
         <value>Creating...</value>
     </data>
     <data name="MyLoadoutsEmptyState_Subtitle" xml:space="preserve">
-        <value>Loadouts enable you to switch between various play styles by customising each with different mods and configurations.</value>
+        <value>Go to My Games to manage an installed game. You can then create and switch between mod setups here.</value>
     </data>
     <data name="MyLoadoutsEmptyState_Header" xml:space="preserve">
-        <value>You need to add a game before using Loadouts</value>
+        <value>Add a game to create your first profile</value>
     </data>
 
     <!-- Library Item Delete Confirmation Dialog -->
@@ -773,7 +773,7 @@
         <value>Applying changes to the game</value>
     </data>
     <data name="LoadoutCard_DeleteLoadoutToolTip" xml:space="preserve">
-        <value>Delete Loadout</value>
+        <value>Delete profile</value>
     </data>
     <data name="LoadoutView_Title_Installed_Mods" xml:space="preserve">
         <value>All ({0})</value>

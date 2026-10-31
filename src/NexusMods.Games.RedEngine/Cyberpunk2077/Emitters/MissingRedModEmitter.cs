@@ -7,6 +7,7 @@ using NexusMods.Abstractions.Loadouts;
 using NexusMods.Paths;
 using NexusMods.Sdk.Games;
 using NexusMods.Sdk.Loadouts;
+using NexusMods.Games.RedEngine.Cyberpunk2077.Extensions;
 using static NexusMods.Games.RedEngine.Constants;
 namespace NexusMods.Games.RedEngine.Cyberpunk2077.Emitters;
 
@@ -21,17 +22,7 @@ public class MissingRedModEmitter : ILoadoutDiagnosticEmitter
     {
         redModInstallFolder = loadout.InstallationInstance.Locations.ToAbsolutePath(RedModInstallFolder);
 
-        if (!redModInstallFolder.DirectoryExists())
-        {
-            numRedModDirs = 0;
-            return false;
-        }
-
-        var redModDirs = redModInstallFolder
-            .EnumerateDirectories("*", false)
-            .Where(x => x.EnumerateFiles(pattern: "*", recursive: false).Any());
-
-        numRedModDirs = redModDirs.Count();
+        numRedModDirs = RedModExtensions.RetrieveEnabledRedModFolders(loadout).Length;
         return numRedModDirs > 0;
     }
 

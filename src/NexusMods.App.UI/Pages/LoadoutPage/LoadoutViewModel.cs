@@ -599,6 +599,7 @@ public class LoadoutViewModel : APageViewModel<ILoadoutViewModel>, ILoadoutViewM
                         .QueryWhenChanged(_ => new ManagedCollectionLoadoutGroup.ReadOnly(_connection.Db, collectionGroupId.Value))
                         .ToObservable()
                         .Where(model => model.IsValid())
+                        .ObserveOnUIThreadDispatcher()
                         .Subscribe(this, (model, self) =>
                             {
                                 self.CollectionStatus.Value = model.Collection.Status.ValueOr(() => Abstractions.NexusModsLibrary.Models.CollectionStatus.Unlisted);
@@ -836,15 +837,13 @@ public class LoadoutViewModel : APageViewModel<ILoadoutViewModel>, ILoadoutViewM
 
     private async ValueTask UpdateCollectionInfo(ManagedCollectionLoadoutGroup.ReadOnly managedCollectionLoadoutGroup, CancellationToken cancellationToken)
     {
-        var graphQlResult = await _nexusModsLibrary.GetLastPublishedRevisionNumber(managedCollectionLoadoutGroup.Collection, cancellationToken);
-
-        // TODO: handle errors
-        var lastPublishedRevisionNumber = graphQlResult.AssertHasData();
-
-        using var tx = _connection.BeginTransaction();
-        if (lastPublishedRevisionNumber.HasValue)
+        try
         {
-            tx.Add(managedCollectionLoadoutGroup, ManagedCollectionLoadoutGroup.LastPublishedRevisionNumber, lastPublishedRevisionNumber.Value);
+            await CollectionCreator.RefreshPublishedRevision(_serviceProvider, managedCollectionLoadoutGroup.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Closing or deactivating this page cancels its background refresh.
         }
     }
 

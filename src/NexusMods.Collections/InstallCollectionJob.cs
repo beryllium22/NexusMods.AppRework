@@ -86,7 +86,11 @@ public class InstallCollectionJob : IJobDefinitionWithStart<InstallCollectionJob
     {
         Logger.LogInformation("Starting installation of `{CollectionName}/{RevisionNumber}`", RevisionMetadata.Collection.Name, RevisionMetadata.RevisionNumber);
 
-        var g = Group.Convert(static x => x.AsCollectionGroup());
+        context.CancellationToken.ThrowIfCancellationRequested();
+        // A retry may reuse this job definition; find the latest committed group instead of
+        // relying on the snapshot supplied when the original attempt was created.
+        var currentGroup = CollectionDownloader.GetCollectionGroup(RevisionMetadata, TargetLoadout, Connection.Db);
+        var g = currentGroup.Convert(static x => x.AsCollectionGroup());
         var items = Items
             .Where(item => !CollectionDownloader.GetStatus(item, g, Connection.Db).IsInstalled(out _))
             .ToArray();
@@ -109,9 +113,9 @@ public class InstallCollectionJob : IJobDefinitionWithStart<InstallCollectionJob
         var modsAndDownloads = GatherDownloads(items, root);
 
         NexusCollectionLoadoutGroup.ReadOnly collectionGroup;
-        if (Group.HasValue)
+        if (currentGroup.HasValue)
         {
-            collectionGroup = Group.Value;
+            collectionGroup = currentGroup.Value;
         }
         else
         {
@@ -145,39 +149,47 @@ public class InstallCollectionJob : IJobDefinitionWithStart<InstallCollectionJob
         var game = (loadout.InstallationInstance.Game as IGame)!;
         var fallbackInstaller = FallbackCollectionDownloadInstaller.Create(ServiceProvider, loadout, game);
 
-        await Parallel.ForEachAsync(modsAndDownloads, context.CancellationToken, async (modAndDownload, _) =>
+        var failures = new List<(CollectionDownload.ReadOnly Download, Exception Error)>();
+        // Install in manifest order: later FOMODs may depend on files committed by earlier
+        // entries, even before the collection is enabled or deployed.
+        foreach (var modAndDownload in modsAndDownloads)
         {
+            context.CancellationToken.ThrowIfCancellationRequested();
             try
             {
                 Logger.LogDebug("Installing `{DownloadName}` (index={Index}) into `{CollectionName}/{RevisionNumber}`", modAndDownload.Mod.Name, modAndDownload.Download.ArrayIndex, RevisionMetadata.Collection.Name, RevisionMetadata.RevisionNumber);
-                await InstallMod(modAndDownload, collectionGroup, fallbackInstaller, game.GetFallbackCollectionInstallDirectory(loadout.InstallationInstance));
+                var child = InstallMod(modAndDownload, collectionGroup, fallbackInstaller, game.GetFallbackCollectionInstallDirectory(loadout.InstallationInstance));
+                using var registration = context.CancellationToken.Register(() => child.Job.AsContext().Cancel());
+                await child;
             }
-            catch (Exception e)
+            catch (OperationCanceledException)
             {
-                Logger.LogError(e, "Failed to install `{DownloadName}` (index={Index}) into `{CollectionName}/{RevisionNumber}`", modAndDownload.Mod.Name, modAndDownload.Download.ArrayIndex, RevisionMetadata.Collection.Name, RevisionMetadata.RevisionNumber);
+                // Cancellation must settle the child before the parent exits. Completed
+                // children remain attached to the collection and are skipped on retry.
+                throw;
             }
-        });
+            catch (Exception exception)
+            {
+                failures.Add((modAndDownload.Download, exception));
+                Logger.LogError(exception, "Failed to install {Requirement} collection item `{DownloadName}` (index={Index})", modAndDownload.Download.IsRequired ? "required" : "optional", modAndDownload.Mod.Name, modAndDownload.Download.ArrayIndex);
+            }
+        }
 
-        var allRequiredItems = CollectionDownloader.GetItems(RevisionMetadata, CollectionDownloader.ItemType.Required);
-        var allRequiredItemsInstalled = allRequiredItems.All(item => CollectionDownloader
+        context.CancellationToken.ThrowIfCancellationRequested();
+        var allRequiredItems = CollectionDownloader.GetItems(CollectionRevisionMetadata.Load(Connection.Db, RevisionMetadata.Id), CollectionDownloader.ItemType.Required);
+        var missingRequiredItems = allRequiredItems.Where(item => !CollectionDownloader
             .GetStatus(item, collectionGroup.AsCollectionGroup(), db: Connection.Db)
-            .IsInstalled(out _));
+            .IsInstalled(out _)).ToArray();
+        var allRequiredItemsInstalled = missingRequiredItems.Length == 0;
         {
             await LoadoutManager.ApplyCollectionDownloadRules(collectionGroup);
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             using var tx = Connection.BeginTransaction();
 
             if (allRequiredItemsInstalled)
             {
                 tx.Retract(collectionGroup.Id, LoadoutItem.Disabled, Null.Instance);
-
-                Events.CollectionsInstallationCompleted(
-                    collectionId: RevisionMetadata.Collection.CollectionId.Value,
-                    revisionId: RevisionMetadata.RevisionId.Value,
-                    gameId: RevisionMetadata.Collection.GameId.Value,
-                    modCount: items.Length,
-                    duration: sw
-                );
             }
             else
             {
@@ -188,6 +200,24 @@ public class InstallCollectionJob : IJobDefinitionWithStart<InstallCollectionJob
             collectionGroup = NexusCollectionLoadoutGroup.Load(result.Db, collectionGroup.Id);
         }
 
+        if (!allRequiredItemsInstalled || failures.Count > 0)
+        {
+            var requiredMessage = allRequiredItemsInstalled
+                ? "All required mods were installed."
+                : $"Required mods are still missing: {string.Join(", ", missingRequiredItems.Select(item => item.Name))}. The collection remains disabled.";
+            var optionalFailures = failures.Where(failure => !failure.Download.IsRequired).Select(failure => failure.Download.Name).ToArray();
+            var optionalMessage = optionalFailures.Length == 0 ? string.Empty
+                : $" Optional mods failed: {string.Join(", ", optionalFailures)}.";
+            throw new AggregateException($"Collection installation is incomplete. {requiredMessage}{optionalMessage} Retry to install the remaining mods; successful installs have been kept.",
+                failures.Select(failure => failure.Error));
+        }
+
+        Events.CollectionsInstallationCompleted(
+            collectionId: RevisionMetadata.Collection.CollectionId.Value,
+            revisionId: RevisionMetadata.RevisionId.Value,
+            gameId: RevisionMetadata.Collection.GameId.Value,
+            modCount: items.Length,
+            duration: sw);
         return collectionGroup;
     }
 
@@ -226,9 +256,11 @@ public class InstallCollectionJob : IJobDefinitionWithStart<InstallCollectionJob
         var map = items.ToDictionary(static download => download.ArrayIndex, static download => download);
         var list = new List<ModAndDownload>();
 
-        foreach (var kv in map)
+        foreach (var kv in map.OrderBy(pair => pair.Key))
         {
             var (index, download) = kv;
+            if (index < 0 || index >= root.Mods.Length)
+                throw new InvalidDataException($"Collection item '{download.Name}' refers to missing manifest entry {index}.");
             var mod = root.Mods[index];
 
             list.Add((mod, download));

@@ -2,6 +2,7 @@ using DynamicData;
 using NexusMods.HyperDuck;
 using NexusMods.MnemonicDB.Abstractions;
 using NexusMods.Sdk.Loadouts;
+using NexusMods.Sdk.Reactive;
 
 namespace NexusMods.Abstractions.Loadouts;
 
@@ -23,7 +24,7 @@ public class LoadoutQueries2
                 loadouts.TrackedEntitiesForLoadout({connection}, {id}) ents
                 LEFT JOIN mdb_Datoms() d ON d.E = ents.Id
                 """)
-            .Observe(x => x.LoadoutId)
+            .ObserveOwned(x => x.LoadoutId)
             .QueryWhenChanged(_ => Loadout.Load(connection.Db, id));
     }
 }

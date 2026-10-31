@@ -15,6 +15,8 @@ public partial class MiniGameWidget : ReactiveUserControl<IMiniGameWidgetViewMod
 
         this.WhenActivated(d =>
             {
+                this.OneWayBind(ViewModel, vm => vm.IsExperimental, view => view.ExperimentalBadge.IsVisible)
+                    .DisposeWith(d);
                 this.OneWayBind(ViewModel, vm => vm.Image, v => v.GameImage.Source)
                     .DisposeWith(d);
 

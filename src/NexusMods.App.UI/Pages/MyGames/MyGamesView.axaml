@@ -39,6 +39,17 @@
                         Description="{x:Static resources:Language.MyGamesView__Page_Description}"
                         Icon="{x:Static icons:IconValues.PictogramGame3D}" />
 
+                    <Border BorderBrush="{StaticResource StrokeTranslucentWeakBrush}"
+                            BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,8,0,8">
+                        <StackPanel Spacing="6">
+                            <CheckBox x:Name="ShowExperimentalGamesCheckBox"
+                                      Content="Show experimental games" />
+                            <TextBlock Text="Includes Skyrim Special Edition / Anniversary Edition, Fallout 4 and The Witcher 3. Support is in development and mod and collection compatibility is incomplete."
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource NeutralSubduedBrush}" />
+                        </StackPanel>
+                    </Border>
+
                     <controls:EmptyState x:Name="DetectedGamesEmptyState"
                                          Margin="0"
                                          HorizontalAlignment="Left">
@@ -96,7 +107,7 @@
 
                 <StackPanel Spacing="24">
 
-                    <TextBlock Text="Other supported games"
+                    <TextBlock Text="Other game integrations"
                                Theme="{StaticResource HeadingXSSemiTheme}"
                                Foreground="{StaticResource NeutralStrongBrush}" />
 

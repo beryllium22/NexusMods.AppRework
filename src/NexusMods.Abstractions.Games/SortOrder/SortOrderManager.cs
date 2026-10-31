@@ -16,12 +16,19 @@ namespace NexusMods.Abstractions.Games;
 /// Implementation for ISortOrderManager
 /// Responsible for subscribing and updating sortOrders for all registered varieties when loadouts or collections change.
 /// </summary>
-public class SortOrderManager : ISortOrderManager, IDisposable
+public class SortOrderManager : ISortOrderManager, IDisposable, IAsyncDisposable
 {
     private readonly IServiceProvider _serviceProvider; 
     private readonly IConnection _connection;
     private IDisposable? _subscription;
     private readonly ILogger<SortOrderManager> _logger;
+
+    private readonly object _lifetimeGate = new();
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource _operationsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _activeOperations;
+    private bool _isStopping;
+    private Task? _disposeTask;
     
     private FrozenDictionary<SortOrderVarietyId, ISortOrderVariety> _sortOrderVarieties;
 
@@ -36,15 +43,25 @@ public class SortOrderManager : ISortOrderManager, IDisposable
     /// <inheritdoc />
     public async ValueTask UpdateLoadOrders(LoadoutId loadoutId, Optional<CollectionGroupId> collectionGroupId = default, CancellationToken token = default)
     {
+        using var operation = BeginOperation(token, throwIfStopping: true)!;
+        await UpdateLoadOrdersCore(loadoutId, collectionGroupId, operation.Token).ConfigureAwait(false);
+    }
+
+    private async ValueTask UpdateLoadOrdersCore(LoadoutId loadoutId, Optional<CollectionGroupId> collectionGroupId, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
         var parentEntity = collectionGroupId.HasValue
             ? OneOf<LoadoutId, CollectionGroupId>.FromT1(collectionGroupId.Value)
             : OneOf<LoadoutId, CollectionGroupId>.FromT0(loadoutId);
         
         foreach (var sortOrderVariety in _sortOrderVarieties.Values)
         {
+            token.ThrowIfCancellationRequested();
             // Reconcile the sort order for each variety
-            var sortOrderId = await sortOrderVariety.GetOrCreateSortOrderFor(loadoutId, parentEntity, token);
-            await sortOrderVariety.ReconcileSortOrder(sortOrderId, token: token);
+            var sortOrderId = await sortOrderVariety.GetOrCreateSortOrderFor(loadoutId, parentEntity, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (sortOrderId == default) continue;
+            await sortOrderVariety.ReconcileSortOrder(sortOrderId, token: token).ConfigureAwait(false);
         }
     }
     
@@ -57,7 +74,8 @@ public class SortOrderManager : ISortOrderManager, IDisposable
         foreach (var sortOrderVariety in _sortOrderVarieties.Values)
         {
             // Create the sort order for each variety
-            _ = await sortOrderVariety.GetOrCreateSortOrderFor(loadoutId, parentEntity, token);
+            token.ThrowIfCancellationRequested();
+            _ = await sortOrderVariety.GetOrCreateSortOrderFor(loadoutId, parentEntity, token).ConfigureAwait(false);
         }
     }
 
@@ -70,10 +88,12 @@ public class SortOrderManager : ISortOrderManager, IDisposable
         foreach (var sortOrderVariety in _sortOrderVarieties.Values)
         {
             // Delete the sort order for each variety
+            token.ThrowIfCancellationRequested();
             var sortOrderId = sortOrderVariety.GetSortOrderIdFor(parentEntity);
             if (!sortOrderId.HasValue) continue;
             
-            await sortOrderVariety.DeleteSortOrder(sortOrderId.Value, token: token);
+            token.ThrowIfCancellationRequested();
+            await sortOrderVariety.DeleteSortOrder(sortOrderId.Value, token: token).ConfigureAwait(false);
         }
     }
 
@@ -86,31 +106,36 @@ public class SortOrderManager : ISortOrderManager, IDisposable
     /// <inheritdoc />
     public void RegisterSortOrderVarieties(ISortOrderVariety[] sortOrderVarieties, IGame game)
     {
-        _sortOrderVarieties = sortOrderVarieties.ToDictionary(variety => variety.SortOrderVarietyId)
+        var varieties = sortOrderVarieties.ToDictionary(variety => variety.SortOrderVarietyId)
             .ToFrozenDictionary();
-        
-        if (_sortOrderVarieties.Count > 0)
+
+        lock (_lifetimeGate)
         {
-            // Subscribe to changes in the sort orders
-            SubscribeToChanges(game.NexusModsGameId.Value);
+            ObjectDisposedException.ThrowIf(_isStopping, this);
+            _subscription?.Dispose();
+            _subscription = null;
+            _sortOrderVarieties = varieties;
+
+            if (_sortOrderVarieties.Count > 0)
+                SubscribeToChanges(game.NexusModsGameId.Value);
         }
     }
 
     protected void SubscribeToChanges(NexusModsGameId nexusModsGameId)
     {
         var compositeDisposable = new CompositeDisposable();
-        var conn = _connection;
+        _subscription = compositeDisposable;
  
         
         // Listen to Loadouts additions/removals
-        Loadout.ObserveAll(_connection)
+        Subscribe(Loadout.ObserveAll(_connection)
             .StartWithEmpty()
             .FilterImmutable(l => l.Installation.GameId == nexusModsGameId)
-            .ToObservable()
-            .SubscribeAwait(this, static async (changes, state, token) =>
+            .ToObservable(), static async (changes, state, token) =>
                 {
                     foreach (var change in changes)
                     {
+                        token.ThrowIfCancellationRequested();
                         var loadoutId = change.Current.LoadoutId;
                         var parentEntity = loadoutId;
 
@@ -119,14 +144,14 @@ public class SortOrderManager : ISortOrderManager, IDisposable
                             case ChangeReason.Add:
                                 // Create the sort order for this loadout
                                 // Might not be needed if the other subscription to loadout items handles it
-                                await state.CreateSortOrders(loadoutId, token: token);
+                                await state.CreateSortOrders(loadoutId, token: token).ConfigureAwait(false);
                                 break;
                             case ChangeReason.Update:
                                 // If loadout changes, we handle that in a separate subscription
                                 break;
                             case ChangeReason.Remove:
                                 // Remove the orphaned sort orders
-                                await state.DeleteSortOrders(loadoutId, token: token);
+                                await state.DeleteSortOrders(loadoutId, token: token).ConfigureAwait(false);
                                 break;
                         }
                     }
@@ -136,14 +161,14 @@ public class SortOrderManager : ISortOrderManager, IDisposable
         
         
         // Listen to collection groups additions/removals
-        CollectionGroup.ObserveAll(_connection)
+        Subscribe(CollectionGroup.ObserveAll(_connection)
             .StartWithEmpty()
             .FilterImmutable(cg => cg.AsLoadoutItemGroup().AsLoadoutItem().Loadout.Installation.GameId == nexusModsGameId)
-            .ToObservable()
-            .SubscribeAwait(this, static async (changes, state, token) =>
+            .ToObservable(), static async (changes, state, token) =>
                 {
                     foreach (var change in changes)
                     {
+                        token.ThrowIfCancellationRequested();
                         var collectionGroupId = change.Current.CollectionGroupId;
                         var loadoutId = change.Current.AsLoadoutItemGroup().AsLoadoutItem().LoadoutId;
                         var parentEntity = Optional.Some(collectionGroupId);
@@ -153,14 +178,14 @@ public class SortOrderManager : ISortOrderManager, IDisposable
                             case ChangeReason.Add:
                                 // Create the sort order for this collection group
                                 // Might not be needed if the other subscription to loadout items handles it
-                                await state.CreateSortOrders(loadoutId, parentEntity, token: token);
+                                await state.CreateSortOrders(loadoutId, parentEntity, token: token).ConfigureAwait(false);
                                 break;
                             case ChangeReason.Update:
                                 // If collection group changes, we handle that in a separate subscription
                                 break;
                             case ChangeReason.Remove:
                                 // Remove the orphaned sort orders
-                                await state.DeleteSortOrders(loadoutId, parentEntity, token: token);
+                                await state.DeleteSortOrders(loadoutId, parentEntity, token: token).ConfigureAwait(false);
                                 break;
                         }
                     }
@@ -172,9 +197,8 @@ public class SortOrderManager : ISortOrderManager, IDisposable
         // Listen to item additions/removals
         // TODO: consider making this Variant specific, to only listen to changes for the relevant items
         // TODO: listen to changes to Game files too
-        SortOrderQueries.TrackLoadoutItemChanges(_connection, nexusModsGameId)
-            .ToObservable()
-            .SubscribeAwait(this, static async (changes, state, token) =>
+        Subscribe(SortOrderQueries.TrackLoadoutItemChanges(_connection, nexusModsGameId)
+            .ToObservable(), static async (changes, state, token) =>
             {
                 // Filter out updates where nothing changed
                 var filteredChanges = changes
@@ -186,6 +210,7 @@ public class SortOrderManager : ISortOrderManager, IDisposable
                 var collections = new Dictionary<CollectionGroupId, LoadoutId>();
                 foreach (var change in filteredChanges)
                 {
+                    token.ThrowIfCancellationRequested();
                     if (change.Reason == ChangeReason.Update)
                         continue;
                     
@@ -200,23 +225,110 @@ public class SortOrderManager : ISortOrderManager, IDisposable
                 // Update loadout sort orders
                 foreach (var loadoutId in loadouts)
                 {
-                    await state.UpdateLoadOrders(loadoutId, token: token);
+                    await state.UpdateLoadOrdersCore(loadoutId, default, token).ConfigureAwait(false);
                 }
                 
                 // Update collection sort orders
                 foreach (var pair in collections)
                 {
-                    await state.UpdateLoadOrders(pair.Value, Optional.Some(pair.Key), token: token);
+                    await state.UpdateLoadOrdersCore(pair.Value, Optional.Some(pair.Key), token).ConfigureAwait(false);
                 }
             })
             .AddTo(compositeDisposable);
         
-        _subscription = compositeDisposable;
     }
 
-    public void Dispose()
+    private IDisposable Subscribe<T>(Observable<T> source, Func<T, SortOrderManager, CancellationToken, ValueTask> callback)
     {
-        _subscription?.Dispose();
+        return source.SubscribeAwait((Manager: this, Callback: callback), static async (changes, state, token) =>
+        {
+            using var operation = state.Manager.BeginOperation(token, throwIfStopping: false);
+            if (operation is null) return;
+
+            try
+            {
+                operation.Token.ThrowIfCancellationRequested();
+                await state.Callback(changes, state.Manager, operation.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
+            {
+                // Cancellation ends this update during shutdown or subscription replacement.
+            }
+        }, configureAwait: false);
+    }
+
+    private Operation? BeginOperation(CancellationToken token, bool throwIfStopping)
+    {
+        lock (_lifetimeGate)
+        {
+            if (_isStopping)
+            {
+                ObjectDisposedException.ThrowIf(throwIfStopping, this);
+                return null;
+            }
+
+            var operation = new Operation(this, CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token));
+            _activeOperations++;
+            return operation;
+        }
+    }
+
+    private void EndOperation()
+    {
+        lock (_lifetimeGate)
+        {
+            _activeOperations--;
+            if (_isStopping && _activeOperations == 0)
+                _operationsDrained.TrySetResult();
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_lifetimeGate)
+        {
+            if (_disposeTask is not null) return new ValueTask(_disposeTask);
+
+            _isStopping = true;
+            if (_activeOperations == 0)
+                _operationsDrained.TrySetResult();
+
+            // Leave the gate before cancellation callbacks run. DI must await all owned work
+            // before it disposes the connection and its native query/storage dependencies.
+            _disposeTask = Task.Run(async () =>
+            {
+                try
+                {
+                    _subscription?.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        await _shutdown.CancelAsync().ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await _operationsDrained.Task.ConfigureAwait(false);
+                        _shutdown.Dispose();
+                    }
+                }
+            });
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    private sealed class Operation(SortOrderManager owner, CancellationTokenSource cancellation) : IDisposable
+    {
+        public CancellationToken Token => cancellation.Token;
+
+        public void Dispose()
+        {
+            cancellation.Dispose();
+            owner.EndOperation();
+        }
     }
 }
 
