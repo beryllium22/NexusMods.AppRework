@@ -13,6 +13,10 @@ helping you make things like new 'Windows' and 'Controls' easier.
 
 ### Running the project
 
+Windows x64 is the primary development target for App Rework. See the
+[Windows preview guide](../WINDOWS_PREVIEW.md) for an already-built development
+ZIP, storage behavior, and opting in to Nexus download/sign-in links.
+
 - Clone the repository (optionally make a fork first)
 - Ensure submodules have been cloned as well, you may use `git submodule update --init --recursive` to do so
 - Build and run the `NexusMods.App` project from your IDE to start the app, or use
@@ -78,6 +82,24 @@ filter above for xUnit and direct execution for TUnit's local-fixture tests.
 Failures are reported by project, and xUnit result files and failed snapshots
 are kept as workflow artifacts. No signing, publishing, or service credentials
 are required for this workflow.
+
+After the Windows tests pass, the job publishes a self-contained x64 app and
+executes `NexusMods.App.exe as-main heartbeat`. This checks the published native
+host, service/database startup, and separate default data paths; it also verifies
+that startup leaves the original data directory and `nxm` registration unchanged.
+Successful jobs upload an unsigned development ZIP and SHA-256 checksum. This
+does not replace interactive GUI or real-game testing.
+
+To publish the same portable layout locally from PowerShell 7 on Windows:
+
+```powershell
+./.github/scripts/publish-windows-preview.ps1
+```
+
+Use a new output directory for each publish. The startup-isolation check script
+is restricted to disposable GitHub Actions runners. Do not set an
+`INSTALLATION_METHOD_*` define for development ZIPs: manual installation mode
+keeps them from offering the original application's releases as updates.
 
 ### Writing code
 

@@ -6,6 +6,8 @@ on:
     branches: [ main ]
     paths:
       - ".github/workflows/clean_environment_tests.yaml"
+      - ".github/scripts/*windows-preview.ps1"
+      - "docs/WINDOWS_PREVIEW.md"
       - "src/**"
       - "tests/**"
       - "**.props"
@@ -18,6 +20,8 @@ on:
     branches: [ main ]
     paths:
       - ".github/workflows/clean_environment_tests.yaml"
+      - ".github/scripts/*windows-preview.ps1"
+      - "docs/WINDOWS_PREVIEW.md"
       - "src/**"
       - "tests/**"
       - "**.props"
@@ -47,11 +51,11 @@ jobs:
   build-and-test:
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-24.04, windows-2022 ]
+        os: [ windows-2022, ubuntu-24.04 ]
 
     steps:
       - name: Check out source and pinned submodules
@@ -109,6 +113,42 @@ jobs:
             throw "Failed test projects: $($failedProjects -join ', ')"
           }
 
+      - name: Publish Windows x64 development preview
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./.github/scripts/publish-windows-preview.ps1
+
+      - name: Check published Windows startup and separate storage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-preview.ps1
+
+      - name: Package verified Windows preview
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildInfo = Get-Content artifacts/windows-preview/BUILD-INFO.json -Raw | ConvertFrom-Json
+          $shortCommit = $buildInfo.sourceCommit.Substring(0, 12)
+          $archive = "artifacts/AppRework-windows-x64-$shortCommit.zip"
+          Compress-Archive -Path artifacts/windows-preview/* -DestinationPath $archive -CompressionLevel Optimal
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($archive))" | Set-Content "$archive.sha256" -Encoding ascii
+
+      - name: Upload Windows development preview
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-rework-windows-x64
+          path: |
+            artifacts/AppRework-windows-x64-*.zip
+            artifacts/AppRework-windows-x64-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
       - name: Upload test results and failed snapshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -116,6 +156,7 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: |
             TestResults/**/*.trx
+            TestResults/windows-preview/**
             tests/**/*.received.*
           if-no-files-found: ignore
           retention-days: 7

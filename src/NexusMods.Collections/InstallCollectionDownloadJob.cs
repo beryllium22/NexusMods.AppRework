@@ -200,7 +200,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
                 Size = file.AsLibraryFile().Size,
                 LoadoutItemWithTargetPath = new LoadoutItemWithTargetPath.New(tx, fileId)
                 {
-                    TargetPath = (fileId, parentPath.LocationId, parentPath.Path.Join(fixedPath)),
+                    TargetPath = (TargetLoadout, parentPath.LocationId, parentPath.Path.Join(fixedPath)),
                     LoadoutItem = new LoadoutItem.New(tx, fileId)
                     {
                         Name = file.Path,
@@ -356,7 +356,7 @@ public class InstallCollectionDownloadJob : IJobDefinitionWithStart<InstallColle
                 Size = libraryItem.Size,
                 LoadoutItemWithTargetPath = new LoadoutItemWithTargetPath.New(tx, fileId)
                 {
-                    TargetPath = (fileId, LocationId.Game, pair.Path),
+                    TargetPath = (TargetLoadout, LocationId.Game, pair.Path),
                     LoadoutItem = new LoadoutItem.New(tx, fileId)
                     {
                         Name = pair.Path,

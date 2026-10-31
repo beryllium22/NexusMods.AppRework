@@ -18,13 +18,11 @@ public class Cyberpunk2077ProtontricksDiagnosticTests(ITestOutputHelper outputHe
             .AddSingleton<IProcessRunner, ProtontricksNotInstalledProcessRunner>();
     }
 
-    [SkippableTheory]
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task MissingProtontricksIsReportedOnlyWhenRedModIsInstalled(bool redModInstalled)
+    public async Task MissingProtontricksIsReportedOnlyOnLinuxWithRedModInstalled(bool redModInstalled)
     {
-        Skip.IfNot(OperatingSystem.IsLinux(), "Protontricks is only required on Linux.");
-
         var loadout = await CreateLoadout();
         if (redModInstalled)
         {
@@ -36,10 +34,10 @@ public class Cyberpunk2077ProtontricksDiagnosticTests(ITestOutputHelper outputHe
         var emitter = Game.DiagnosticEmitters.OfType<MissingProtontricksForRedModEmitter>().Single();
         var diagnostics = await emitter.Diagnose(loadout, CancellationToken.None).ToListAsync();
 
-        if (redModInstalled)
+        if (OperatingSystem.IsLinux() && redModInstalled)
             diagnostics.Should().ContainSingle("the REDmod tool needs Protontricks to run on Linux");
         else
-            diagnostics.Should().BeEmpty("without REDmod there is no tool for Protontricks to launch");
+            diagnostics.Should().BeEmpty("Protontricks is only needed for REDmod on Linux");
     }
 
     private sealed class ProtontricksNotInstalledProcessRunner : IProcessRunner

@@ -279,7 +279,7 @@ public class HttpDownloadJobIntegrityTests
         public DownloadFixture(Func<HttpRequestMessage, HttpResponseMessage> respond)
         {
             var fileSystem = new InMemoryFileSystem();
-            Destination = fileSystem.FromUnsanitizedFullPath(Path.GetFullPath("download-integrity-test.zip"));
+            Destination = fileSystem.GetKnownPath(KnownPath.TempDirectory).Combine("download-integrity-test.zip");
             Destination.Parent.CreateDirectory();
             _client = new HttpClient(new ScriptedHandler(respond));
             _job = new HttpDownloadJob

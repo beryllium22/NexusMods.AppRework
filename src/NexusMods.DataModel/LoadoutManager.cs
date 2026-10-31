@@ -374,7 +374,7 @@ internal partial class LoadoutManager : ILoadoutManager
         tx.Add(new AddPriorityTxFunc(targetLoadout, groupId));
 
         var result = await tx.Commit();
-        return LoadoutItemGroup.Load(result.Db, groupId);
+        return LoadoutItemGroup.Load(result.Db, result[groupId]);
     }
 
     public IJobTask<IInstallLoadoutItemJob, InstallLoadoutItemJobResult> InstallItem(
@@ -535,7 +535,14 @@ internal partial class LoadoutManager : ILoadoutManager
 
         var loadoutId = CollectionGroup.Load(basisDb, collectionId).AsLoadoutItemGroup().AsLoadoutItem().LoadoutId;
         var nextPriority = GetNextPriority(loadoutId, _connection.Db);
-        var oldPriorities = LoadoutItemGroupPriority.All(basisDb).Where(priority => priority.Target.AsLoadoutItem().ParentId.Value == collectionId.Value).OrderBy(x => x.Priority).ToArray();
+        var oldPriorities = LoadoutItemGroupPriority.FindByLoadout(basisDb, loadoutId)
+            .Where(priority =>
+            {
+                var item = priority.Target.AsLoadoutItem();
+                return item.HasParent() && item.ParentId.Value == collectionId.Value;
+            })
+            .OrderBy(x => x.Priority)
+            .ToArray();
 
         for (uint i = 0; i < oldPriorities.Length; i++)
         {

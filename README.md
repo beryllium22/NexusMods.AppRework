@@ -1,6 +1,6 @@
 # App Rework
 
-An independent community continuation of the archived [Nexus Mods App](https://github.com/Nexus-Mods/NexusMods.App), with Windows and Linux as development targets.
+An independent community continuation of the archived [Nexus Mods App](https://github.com/Nexus-Mods/NexusMods.App). **Windows x64 is the primary development target.** Existing Linux checks help preserve shared-code compatibility.
 
 This repository is `beryllium22/NexusMods.AppRework`. It is not an official Nexus Mods product. **App Rework is a working title**; a distinct public identity, distribution, and data migration plan are required before a public release.
 
@@ -8,9 +8,15 @@ This repository is `beryllium22/NexusMods.AppRework`. It is not an official Nexu
 
 **Development alpha.** The inherited application contains a native Avalonia interface, mod library, loadouts, collections, downloads, game discovery, installers, and file conflict handling. The rework starts by making these workflows reliable and maintainable.
 
-The first continuation changes address interrupted HTTP downloads, a game-file database query, a Cyberpunk 2077 Linux diagnostic, and independent Windows/Linux build checks. See the [roadmap and port record](docs/REWORK_ROADMAP.md) for scope, provenance, and release gates.
+Continuation changes address interrupted HTTP downloads, game-file queries, collection installation and copying, publication-state persistence, and independent build checks. Fresh defaults use separate App Rework storage, and Nexus link registration is opt-in. See the [roadmap and port record](docs/REWORK_ROADMAP.md) for scope, provenance, and release gates.
 
 The original project documented support for Stardew Valley, Cyberpunk 2077, Baldur's Gate 3, and Mount & Blade II: Bannerlord. These are inherited integrations, **not a fresh compatibility certification for current game versions**. Skyrim Special Edition and Fallout 4 code is experimental and incomplete.
+
+## Try the Windows development preview
+
+Successful Windows CI jobs publish an unsigned, self-contained x64 ZIP with the .NET runtime included. Follow the [Windows preview guide](docs/WINDOWS_PREVIEW.md) for download instructions, separate storage, Nexus sign-in/link setup, and validation limits.
+
+The preview is for testing with disposable game installations. Automated startup and fixture tests do not certify real-game modding, and two managers can still conflict if they apply changes to the same game folder.
 
 ## Build and contribute
 
@@ -25,7 +31,7 @@ dotnet build NexusMods.App.sln --configuration Release --no-restore
 
 The first build also downloads public game metadata and hashes. It does not require a Nexus Mods account. See the [contributor guide](docs/developers/Contributing.md) for running the app, platform dependencies, and the separate xUnit/TUnit test commands.
 
-Use disposable game installations and separate test data during development. Storage paths, application identifiers, telemetry settings, update endpoints, and packaging still include inherited upstream behavior; this branch is not a ready-to-install public release.
+Fresh settings and application data use `NexusMods.AppRework` directories; the original app's database is not imported. Public branding, API identity, signed installation, updates, and data migration remain release work. Development ZIPs use manual update mode and exclude the inherited uninstall helpers.
 
 ## Development priorities
 
