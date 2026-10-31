@@ -564,20 +564,27 @@ public abstract class AIsolatedGameTest<TTest, TGame> : IAsyncLifetime where TGa
         Game = (TGame)GameInstallation.Game;
     }
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
-        _ = Task.Run(async () =>
-        {
-            // NOTE(erri120): forcing this method to complete within max 10 seconds
-            await _host.StopAsync(cancellationToken: new CancellationToken(canceled: true)).WaitAsync(timeout: TimeSpan.FromSeconds(1));
-            if (_host is IAsyncDisposable asyncDisposable) await asyncDisposable.DisposeAsync().AsTask().WaitAsync(timeout: TimeSpan.FromSeconds(5));
-            else
-            {
-                await Task.Run(() => _host.Dispose()).WaitAsync(timeout: TimeSpan.FromSeconds(5));
-            }
-        });
+        var shutdownTimeout = TimeSpan.FromSeconds(30);
+        using var shutdownCancellation = new CancellationTokenSource(shutdownTimeout);
 
-        return Task.CompletedTask;
+        try
+        {
+            await _host.StopAsync(shutdownCancellation.Token).WaitAsync(shutdownTimeout).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Await teardown so native resources cannot outlive a successfully completed fixture.
+            // Run disposal on the pool to bound synchronous IDisposable implementations as well.
+            await Task.Run(async () =>
+            {
+                if (_host is IAsyncDisposable asyncDisposable)
+                    await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+                else
+                    _host.Dispose();
+            }).WaitAsync(shutdownTimeout).ConfigureAwait(false);
+        }
     }
     
     /// <summary>

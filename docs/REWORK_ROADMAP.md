@@ -43,6 +43,7 @@ The build foundation replaces the upstream reusable clean-test workflow with loc
 - Keep copied collections independent of unrelated loadout priorities and tolerate ordinary parentless mod groups. Verify bundled/replicated file ownership through REDmod queries, collection copies, and loadout copies without changing existing physical files.
 - Correct the downloader test's host-drive assumption and verify that Windows never receives the Linux-only Protontricks diagnostic.
 - Make the inherited cancellation fixture wait for cancellation without a polling-loop race; keep the Windows test enabled and preserve the production job cancellation contract.
+- Await isolated-game fixture shutdown and disposal, with bounded cleanup and visible failures. Preserve native Windows crash dumps, test sequence files, and runner diagnostics so an aborted test host can be investigated; retain the complete test gate before packaging.
 - Repair the shell launch path used by SMAPI on Windows: retain arguments, preserve startup failures and cancellation, keep process disposal with the caller, and wait for a cancelled process to exit without stopping unrelated processes. Cover direct/shell exit results and cancellation with controlled local processes.
 
 These local changes extend the attributed ports. The [Windows preview guide](WINDOWS_PREVIEW.md) explains how to run the build and what its checks cover.

@@ -81,7 +81,30 @@ jobs:
           -p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true
           -p:CreateHardLinksForCopyLocalIfPossible=true
 
+      - name: Prepare Windows native crash capture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolDirectory = Join-Path $env:RUNNER_TEMP 'app-rework-procdump'
+          $archive = Join-Path $env:RUNNER_TEMP 'app-rework-procdump.zip'
+          Invoke-WebRequest 'https://download.sysinternals.com/files/Procdump.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $toolDirectory
+          foreach ($name in @('procdump.exe', 'procdump64.exe')) {
+            $tool = Join-Path $toolDirectory $name
+            $signature = Get-AuthenticodeSignature $tool
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+              throw "ProcDump signature verification failed: $name"
+            }
+            Write-Host "$name version $((Get-Item $tool).VersionInfo.FileVersion)"
+          }
+          Write-Host "ProcDump archive SHA256: $((Get-FileHash $archive -Algorithm SHA256).Hash)"
+          "PROCDUMP_PATH=$toolDirectory" | Add-Content $env:GITHUB_ENV
+          # .NET's default crash collector does not capture native access violations.
+          'VSTEST_DUMP_FORCEPROCDUMP=1' | Add-Content $env:GITHUB_ENV
+
       - name: Run tests without live service credentials
+        id: tests
         shell: pwsh
         env:
           TEST_FILTER: "RequiresNetworking!=True&RequiresApiKey!=True&FlakeyTest!=True"
@@ -89,6 +112,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $failedProjects = @()
+          New-Item -ItemType Directory -Path TestResults/diagnostics -Force | Out-Null
+          (Get-Date).ToUniversalTime().ToString('o') | Set-Content TestResults/test-run-started.txt
           $solutionProjects = dotnet sln NexusMods.App.sln list
           if ($LASTEXITCODE -ne 0) { throw 'Unable to enumerate solution projects.' }
           $projects = @($solutionProjects | Where-Object { $_ -like '*.Tests.csproj' } | ForEach-Object { Get-Item $_.Replace('\', '/') } | Sort-Object FullName)
@@ -103,7 +128,7 @@ jobs:
               # runner and must not silently ignore the xUnit --filter option.
               dotnet run --project $project.FullName --configuration Release --no-build --no-restore
             } else {
-              dotnet test $project.FullName --configuration Release --no-build --no-restore --filter $env:TEST_FILTER --logger "trx;LogFileName=$($project.BaseName).trx" --results-directory TestResults --blame-hang-timeout 10m
+              dotnet test $project.FullName --configuration Release --no-build --no-restore --filter $env:TEST_FILTER --logger "trx;LogFileName=$($project.BaseName).trx" --results-directory TestResults --blame-crash --blame-crash-dump-type mini --blame-hang-timeout 10m --blame-hang-dump-type mini --diag "TestResults/diagnostics/$($project.BaseName).log"
             }
 
             if ($LASTEXITCODE -ne 0) { $failedProjects += $project.BaseName }
@@ -111,6 +136,22 @@ jobs:
 
           if ($failedProjects.Count -gt 0) {
             throw "Failed test projects: $($failedProjects -join ', ')"
+          }
+
+      - name: Preserve Windows application crash events
+        if: failure() && runner.os == 'Windows' && steps.tests.outcome == 'failure'
+        shell: pwsh
+        run: |
+          # Supplement the dump with the faulting module/exception code when Windows
+          # logged it. Diagnostics must not replace the original failed test result.
+          try {
+            $started = [datetime]::Parse((Get-Content TestResults/test-run-started.txt -Raw)).ToLocalTime()
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1026; StartTime = $started } -ErrorAction Stop |
+              Where-Object { $_.Message -match 'testhost|dotnet|NexusMods' } |
+              Select-Object TimeCreated, Id, ProviderName, Message)
+            ConvertTo-Json -InputObject $events -Depth 4 | Set-Content TestResults/diagnostics/windows-application-errors.json
+          } catch {
+            Write-Warning "Windows crash events were unavailable: $_"
           }
 
       - name: Publish Windows x64 development preview
@@ -155,8 +196,7 @@ jobs:
         with:
           name: test-results-${{ matrix.os }}
           path: |
-            TestResults/**/*.trx
-            TestResults/windows-preview/**
+            TestResults/**
             tests/**/*.received.*
           if-no-files-found: ignore
           retention-days: 7
