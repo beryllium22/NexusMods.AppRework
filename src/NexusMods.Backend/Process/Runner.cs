@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using CliWrap;
 using Microsoft.Extensions.DependencyInjection;
@@ -110,46 +111,37 @@ internal class ProcessRunner : IProcessRunner
             .WithStandardErrorPipe(mergedStdErrPipe);
     }
 
-    public Task RunAsync(System.Diagnostics.Process process, CancellationToken cancellationToken = default)
+    public async Task RunAsync(System.Diagnostics.Process process, CancellationToken cancellationToken = default)
     {
-        var tcs = new TaskCompletionSource();
+        cancellationToken.ThrowIfCancellationRequested();
 
-        process.EnableRaisingEvents = true;
-        var hasExited = false;
-
-        process.Exited += (_, _) =>
-        {
-            hasExited = true;
-            tcs.SetResult();
-            process.Dispose();
-        };
-        
-        cancellationToken.Register(() =>
-        {
-            if (hasExited) return;
-            try
-            {
-                _logger.LogInformation("Killing process `{Process}`", process.StartInfo.FileName);
-                process.Kill();
-            }
-            catch (Exception e)
-            {
-                _logger.LogError(e, "Failed to kill process `{Process}`", process.StartInfo.FileName);
-                tcs.SetException(e);
-            }
-        });
+        _logger.LogInformation("Executing process `{Process}`", process.StartInfo.FileName);
+        if (!process.Start())
+            throw new InvalidOperationException($"No process was started for `{process.StartInfo.FileName}`.");
 
         try
         {
-            _logger.LogInformation("Executing process `{Process}`", process.StartInfo.FileName);
-            process.Start();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception e)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogError(e, "Failed to start process `{Process}`", process.StartInfo.FileName);
-            tcs.SetException(e);
-        }
+            try
+            {
+                if (!process.HasExited)
+                {
+                    _logger.LogInformation("Killing process `{Process}`", process.StartInfo.FileName);
+                    process.Kill();
+                }
+            }
+            catch (Exception e) when ((e is Win32Exception or InvalidOperationException) && process.HasExited)
+            {
+                // Natural exit can race with cancellation between HasExited and Kill.
+            }
 
-        return tcs.Task; 
+            // Cancellation must not release the caller's process handle while it is still
+            // running. A genuine Kill failure propagates instead of waiting indefinitely.
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 }

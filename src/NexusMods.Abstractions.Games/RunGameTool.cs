@@ -98,7 +98,7 @@ public class RunGameTool<T> : IRunGameTool
         if (UseShell)
         {
             _logger.LogInformation("Running {Program} through shell", program);
-            await RunWithShell(cancellationToken, program);
+            await RunWithShell(cancellationToken, commandLineArgs, program);
         }
         else
         {
@@ -140,9 +140,9 @@ public class RunGameTool<T> : IRunGameTool
         return result;
     }
 
-    private async Task<Process> RunWithShell(CancellationToken cancellationToken, AbsolutePath program)
+    private async Task RunWithShell(CancellationToken cancellationToken, string[] arguments, AbsolutePath program)
     {
-        var process = new Process
+        using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -151,22 +151,15 @@ public class RunGameTool<T> : IRunGameTool
                 UseShellExecute = true,
                 CreateNoWindow = false,
             },
-            EnableRaisingEvents = true,
         };
         
-        try
-        {
-            await _processRunner.RunAsync(process, cancellationToken);
-        }
-        catch (Exception e)
-        {
-            if (!cancellationToken.IsCancellationRequested)
-                _logger.LogError(e, "While Running {Filename}", program);
-        }
+        foreach (var argument in arguments)
+            process.StartInfo.ArgumentList.Add(argument);
+
+        await _processRunner.RunAsync(process, cancellationToken);
         
         if (process.ExitCode != 0)
             _logger.LogWarning("Application closed with a non-zero exit code ({ExitCode}): {Application}", process.ExitCode, program);
-        return process;
     }
 
     private async Task RunThroughSteam(string appId, CancellationToken cancellationToken, string[] commandLineArgs)

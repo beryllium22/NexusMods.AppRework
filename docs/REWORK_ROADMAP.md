@@ -1,6 +1,6 @@
 # App Rework: continuation plan
 
-Reviewed on **2026-10-30**. This is a development plan and provenance record, not a claim of release readiness.
+Reviewed on **2026-10-31**. This is a development plan and provenance record, not a claim of release readiness.
 
 ## Starting point
 
@@ -42,6 +42,8 @@ The build foundation replaces the upstream reusable clean-test workflow with loc
 - Persist collection publication refreshes through the collection service, including cancellation, API failure, deletion, and newer local publication handling. Dispatch database-observer updates to the UI thread.
 - Keep copied collections independent of unrelated loadout priorities and tolerate ordinary parentless mod groups. Verify bundled/replicated file ownership through REDmod queries, collection copies, and loadout copies without changing existing physical files.
 - Correct the downloader test's host-drive assumption and verify that Windows never receives the Linux-only Protontricks diagnostic.
+- Make the inherited cancellation fixture wait for cancellation without a polling-loop race; keep the Windows test enabled and preserve the production job cancellation contract.
+- Repair the shell launch path used by SMAPI on Windows: retain arguments, preserve startup failures and cancellation, keep process disposal with the caller, and wait for a cancelled process to exit without stopping unrelated processes. Cover direct/shell exit results and cancellation with controlled local processes.
 
 These local changes extend the attributed ports. The [Windows preview guide](WINDOWS_PREVIEW.md) explains how to run the build and what its checks cover.
 
@@ -63,6 +65,7 @@ For every port, record source SHA/license, inspect dependencies and migrations, 
 - Windows compiles, tests, publishes, and starts from a clean checkout with documented public inputs and no developer credentials. Retain Linux compilation/tests for shared-code compatibility.
 - Download failures, pauses, changed resources, ignored ranges, and truncated bodies cannot silently become successful corrupted archives.
 - Install/apply failures preserve recoverable state and produce useful errors. This is a separate gate from HTTP tests.
+- Next Windows integration target: Cyberpunk REDmod install → Apply → Launch. `MissingRedModEmitter` currently checks deployed directories, and `Cyberpunk2077Synchronizer` can return normally after file synchronization when `redmod.exe` is missing. Verify pending enabled mods before Apply, represent deployment failure accurately, and test successful retry with a controlled process runner before certifying this workflow.
 - Review dependencies and bundled binaries. Initial restore reports advisory [GHSA-4625-4j76-fww9](https://github.com/advisories/GHSA-4625-4j76-fww9) for inherited `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.12.0; resolve before release.
 - Establish public name, icons, package IDs, data paths, update feed, support destinations, telemetry behavior, and API identity, with an explicit data migration plan.
 - Define maintenance/source policy for game hashes and game metadata. Their present upstream availability is not a long-term guarantee.
