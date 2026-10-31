@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
+using System.Reactive.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -15,13 +16,14 @@ using ReactiveUI;
 
 namespace NexusMods.App.UI.Windows;
 
-internal sealed class WindowManager : ReactiveObject, IWindowManager
+internal sealed class WindowManager : ReactiveObject, IWindowManager, IDisposable
 {
     private readonly ILogger<WindowManager> _logger;
     private readonly IConnection _connection;
 
     private readonly Dictionary<WindowId, WeakReference<IWorkspaceWindow>> _windows = new();
     private readonly SourceList<WindowId> _allWindowIdSource = new();
+    private readonly IDisposable _windowIdsSubscription;
 
     public WindowManager(
         ILogger<WindowManager> logger,
@@ -29,7 +31,7 @@ internal sealed class WindowManager : ReactiveObject, IWindowManager
     {
         _logger = logger;
         _connection = connection;
-        _allWindowIdSource.Connect().OnUI().Bind(out _allWindowIds);
+        _windowIdsSubscription = _allWindowIdSource.Connect().OnUI().Bind(out _allWindowIds).Subscribe();
     }
 
     private WindowId _activeWindowId = WindowId.DefaultValue;
@@ -123,7 +125,11 @@ internal sealed class WindowManager : ReactiveObject, IWindowManager
                 tx.Add(found.Id, WindowDataAttributes.Data, WindowDataAttributes.Encode(_connection.Db, data));
             }
 
-            tx.Commit();
+            // The window-close callback is synchronous. Finish the transaction
+            // before disposing it or allowing host/database shutdown to begin.
+            // Commit captures its calling synchronization context, so invoke it on
+            // the pool to avoid waiting for a continuation on this blocked UI thread.
+            Task.Run(tx.Commit).GetAwaiter().GetResult();
         }
         catch (Exception e)
         {
@@ -168,14 +174,26 @@ internal sealed class WindowManager : ReactiveObject, IWindowManager
     private void ResetSavedData()
     {
         _logger.LogInformation("Removing possible broken window state from the DB");
-        using var tx = _connection.BeginTransaction();
-
-        foreach (var datom in _connection.Db.Datoms(WindowDataAttributes.PrimaryAttribute))
+        try
         {
-            tx.Delete(datom.E, recursive: true);
-        }
+            using var tx = _connection.BeginTransaction();
+            foreach (var datom in _connection.Db.Datoms(WindowDataAttributes.PrimaryAttribute))
+            {
+                tx.Delete(datom.E, recursive: true);
+            }
 
-        tx.Commit();
+            Task.Run(tx.Commit).GetAwaiter().GetResult();
+        }
+        catch (Exception e)
+        {
+            _logger.LogError(e, "Exception clearing saved window state");
+        }
+    }
+
+    public void Dispose()
+    {
+        _windowIdsSubscription.Dispose();
+        _allWindowIdSource.Dispose();
     }
     
     public async Task<StandardDialogResult> ShowDialog(IDialog dialog, DialogWindowType windowType)

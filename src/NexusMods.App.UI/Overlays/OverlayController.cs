@@ -8,19 +8,22 @@ namespace NexusMods.App.UI.Overlays;
 /// <inheritdoc />
 public class OverlayController : ReactiveObject, IOverlayController
 {
-    private readonly object _lockObject = new();
-    public IOverlayViewModel? CurrentOverlay { get; set; }
+    public IOverlayViewModel? CurrentOverlay { get; private set; }
     
-    private Queue<IOverlayViewModel> _queue = new();
+    private readonly Queue<IOverlayViewModel> _queue = new();
     public void Enqueue(IOverlayViewModel overlayViewModel)
     {
-        lock (_lockObject)
+        // Marshal before accessing the queue. Holding a worker-thread lock while
+        // invoking the dispatcher deadlocks if the UI is closing another overlay.
+        Dispatcher.UIThread.Invoke(() =>
         {
+            if (overlayViewModel.Status == Status.Closed || ReferenceEquals(CurrentOverlay, overlayViewModel) || _queue.Contains(overlayViewModel)) return;
+
             overlayViewModel.Controller = this;
             _queue.Enqueue(overlayViewModel);
             
             ProcessNext();
-        }
+        });
     }
 
     public async Task<TResult?> EnqueueAndWait<TResult>(IOverlayViewModel<TResult> overlayViewModel)
@@ -48,16 +51,12 @@ public class OverlayController : ReactiveObject, IOverlayController
 
     private void NotifyCurrentOverlayChanged()
     {
-        Dispatcher.UIThread.Invoke(() =>
-            {
-                this.RaisePropertyChanged(nameof(CurrentOverlay));
-            }
-        );
+        this.RaisePropertyChanged(nameof(CurrentOverlay));
     }
 
     public void Remove(IOverlayViewModel model)
     {
-        lock (_lockObject)
+        Dispatcher.UIThread.Invoke(() =>
         {
             if (CurrentOverlay == model)
             {
@@ -78,6 +77,6 @@ public class OverlayController : ReactiveObject, IOverlayController
                     _queue.Enqueue(item);
                 }
             }
-        }
+        });
     }
 }

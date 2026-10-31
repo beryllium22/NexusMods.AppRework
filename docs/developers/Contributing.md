@@ -39,16 +39,16 @@ dotnet build NexusMods.App.sln --configuration Release --no-restore
 
 The solution includes large native dependencies for several operating systems.
 Copying them into every test project's output can consume over 20 GB. On a
-space-constrained build machine, MSBuild can hardlink compiled outputs and package
-dependencies instead:
+space-constrained build machine, MSBuild can hardlink copied package dependencies:
 
 ```sh
-dotnet build NexusMods.App.sln --configuration Release --no-restore -p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true -p:CreateHardLinksForCopyLocalIfPossible=true
+dotnet build NexusMods.App.sln --configuration Release --no-restore -p:CreateHardLinksForCopyLocalIfPossible=true
 ```
 
-The two switches cover different copy tasks: the first handles a project's own
-assembly and symbols; the second handles referenced assemblies and native NuGet
-assets. The NuGet package cache and output directories must be on the same
+This switch handles referenced assemblies and native NuGet assets. Keep each
+project's compiled output separate from its intermediate assembly: post-processors
+can rewrite assemblies in place during incremental builds. The NuGet package
+cache and output directories must be on the same
 filesystem for hardlinks to work. CI sets `NUGET_PACKAGES` to
 `${{ github.workspace }}/.nuget/packages` before restoring, so this also works on
 Windows runners whose default package cache is on a different drive. MSBuild
@@ -84,9 +84,11 @@ are kept as workflow artifacts. No signing, publishing, or service credentials
 are required for this workflow.
 
 After the Windows tests pass, the job publishes a self-contained x64 app and
-executes `NexusMods.App.exe as-main heartbeat`. This checks the published native
-host, service/database startup, and separate default data paths; it also verifies
-that startup leaves the original data directory and `nxm` registration unchanged.
+executes `NexusMods.App.exe as-main heartbeat` and
+`NexusMods.App.exe as-main diagnose-game-discovery`. These check the published native
+host, service/database startup, actual locator construction/enumeration, and separate
+default data paths. They also verify that startup leaves the original data directory
+and `nxm` registration unchanged. Zero discovered games is a valid result.
 Successful jobs upload an unsigned development ZIP and SHA-256 checksum. This
 does not replace interactive GUI or real-game testing.
 

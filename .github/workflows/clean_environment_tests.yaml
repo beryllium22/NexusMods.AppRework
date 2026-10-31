@@ -8,6 +8,8 @@ on:
       - ".github/workflows/clean_environment_tests.yaml"
       - ".github/scripts/*windows-preview.ps1"
       - "docs/WINDOWS_PREVIEW.md"
+      - "docs/STABILITY.md"
+      - "docs/REWORK_ROADMAP.md"
       - "src/**"
       - "tests/**"
       - "**.props"
@@ -22,6 +24,8 @@ on:
       - ".github/workflows/clean_environment_tests.yaml"
       - ".github/scripts/*windows-preview.ps1"
       - "docs/WINDOWS_PREVIEW.md"
+      - "docs/STABILITY.md"
+      - "docs/REWORK_ROADMAP.md"
       - "src/**"
       - "tests/**"
       - "**.props"
@@ -73,12 +77,11 @@ jobs:
         run: dotnet restore NexusMods.App.sln
 
       - name: Build
-        # MSBuild uses separate switches for project outputs and copied package
-        # dependencies. The latter prevents repeating every native runtime in
-        # every test directory. Source files and test fixtures remain copies.
+        # Share copied package dependencies to avoid repeating native runtimes.
+        # Keep project outputs separate from obj: post-processors can rewrite
+        # assemblies in place during incremental builds.
         run: >-
           dotnet build NexusMods.App.sln --configuration Release --no-restore
-          -p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true
           -p:CreateHardLinksForCopyLocalIfPossible=true
 
       - name: Prepare Windows native crash capture

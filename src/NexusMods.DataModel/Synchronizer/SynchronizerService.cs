@@ -72,6 +72,8 @@ public class SynchronizerService : ISynchronizerService
                 if (!loadout.IsValid())
                     return ValueTask.FromResult(false);
                 var synchronizer = loadout.InstallationInstance.GetGame().Synchronizer;
+                if (synchronizer.HasPendingDeployment(loadout))
+                    return ValueTask.FromResult(true);
                 var metaData = loadout.Installation;
                 var hasPreviousLoadout = GameInstallMetadata.LastSyncedLoadoutTransaction.TryGetValue(metaData, out var lastId);
 
@@ -88,8 +90,8 @@ public class SynchronizerService : ISynchronizerService
         await _jobMonitor.Begin(new SynchronizeLoadoutJob(loadoutId),
             async ctx =>
             {
-                var job = ctx.Definition;
-                await _semaphore.WaitAsync();
+                var job = ctx.Definition with { CancellationToken = ctx.CancellationToken };
+                await _semaphore.WaitAsync(ctx.CancellationToken);
                 try
                 {
                     var loadout = Loadout.Load(_conn.Db, loadoutId);
@@ -260,6 +262,9 @@ public class SynchronizerService : ISynchronizerService
 
                     if (last.Id != loadoutId && last != default(LoadoutWithTxId))
                         return LoadoutSynchronizerState.OtherLoadoutSynced;
+
+                    if (rev.InstallationInstance.GetGame().Synchronizer.HasPendingDeployment(rev))
+                        return LoadoutSynchronizerState.NeedsSync;
 
                     // Last DB revision is the same in the applied loadout
                     if (last.Id == rev.LoadoutId && revDbTx == last.Tx)

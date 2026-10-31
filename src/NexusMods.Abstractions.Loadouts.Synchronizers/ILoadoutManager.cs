@@ -102,7 +102,8 @@ public interface ILoadoutManager
     ValueTask ApplyCollectionDownloadRules(NexusCollectionLoadoutGroupId collectionId);
 
     /// <summary>
-    /// Removes all groups and installs the new library item.
+    /// Replaces each group with an installation of the new library item, preserving
+    /// its parent, disabled setting, and conflict priority.
     /// </summary>
     ValueTask ReplaceItems(LoadoutId loadoutId, LoadoutItemGroupId[] groupsToRemove, LibraryItem.ReadOnly libraryItemToInstall);
 

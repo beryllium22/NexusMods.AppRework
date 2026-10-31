@@ -14,7 +14,7 @@ try {
 
     # Keep the manual installation mode: inherited archive builds query the
     # original application's update feed, which is not this fork's update feed.
-    dotnet publish src/NexusMods.App/NexusMods.App.csproj --configuration Release --runtime win-x64 --self-contained true --output $outputPath -p:PublishSingleFile=false -p:PublishTrimmed=false -p:PublishReadyToRun=false -p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true -p:CreateHardLinksForCopyLocalIfPossible=true
+    dotnet publish src/NexusMods.App/NexusMods.App.csproj --configuration Release --runtime win-x64 --self-contained true --output $outputPath -p:PublishSingleFile=false -p:PublishTrimmed=false -p:PublishReadyToRun=false -p:CreateHardLinksForCopyLocalIfPossible=true
     if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed.' }
 
     # These inherited installer helpers can revert managed games or terminate
@@ -26,7 +26,13 @@ try {
 
     Copy-Item LICENSE.md $outputPath
     Copy-Item docs/WINDOWS_PREVIEW.md (Join-Path $outputPath 'README.md')
-    Copy-Item docs/REWORK_ROADMAP.md (Join-Path $outputPath 'PORTS-AND-ROADMAP.md')
+    # Keep the packaged documents navigable after renaming the preview guide
+    # and roadmap. Developer-only instructions remain linked to the source repo.
+    $roadmap = Get-Content docs/REWORK_ROADMAP.md -Raw
+    $roadmap.Replace('(WINDOWS_PREVIEW.md)', '(README.md)').Replace('(developers/Contributing.md)', '(https://github.com/beryllium22/NexusMods.AppRework/blob/main/docs/developers/Contributing.md)') |
+        Set-Content (Join-Path $outputPath 'PORTS-AND-ROADMAP.md') -Encoding utf8
+    (Get-Content docs/STABILITY.md -Raw).Replace('(REWORK_ROADMAP.md)', '(PORTS-AND-ROADMAP.md)') |
+        Set-Content (Join-Path $outputPath 'STABILITY.md') -Encoding utf8
 
     $buildCommit = git rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Unable to identify the published source.' }

@@ -1,7 +1,9 @@
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
+using Avalonia.Threading;
 using DynamicData;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NexusMods.Abstractions.Loadouts;
 using NexusMods.Abstractions.Loadouts.Exceptions;
 using NexusMods.Abstractions.Loadouts.Synchronizers;
@@ -33,6 +35,7 @@ public class ApplyControlViewModel : AViewModel<IApplyControlViewModel>, IApplyC
     private readonly IJobMonitor _jobMonitor;
     private readonly IWindowNotificationService _notificationService;
     private readonly IGameRegistry _gameRegistry;
+    private readonly ILogger<ApplyControlViewModel> _logger;
 
     private readonly LoadoutId _loadoutId;
     private readonly IServiceProvider _serviceProvider;
@@ -61,6 +64,7 @@ public class ApplyControlViewModel : AViewModel<IApplyControlViewModel>, IApplyC
         _notificationService = serviceProvider.GetRequiredService<IWindowNotificationService>();
         var windowManager = serviceProvider.GetRequiredService<IWindowManager>();
         _gameRegistry = serviceProvider.GetRequiredService<IGameRegistry>();
+        _logger = serviceProvider.GetRequiredService<ILogger<ApplyControlViewModel>>();
 
         _gameMetadataId = Sdk.Loadouts.Loadout.Load(_conn.Db, loadoutId).InstallationId;
 
@@ -159,19 +163,32 @@ public class ApplyControlViewModel : AViewModel<IApplyControlViewModel>, IApplyC
 
     private async Task Apply()
     {
-        var loadout = Sdk.Loadouts.Loadout.Load(_conn.Db, _loadoutId);
+        var loadout = default(Sdk.Loadouts.Loadout.ReadOnly);
         try
         {
+            loadout = Sdk.Loadouts.Loadout.Load(_conn.Db, _loadoutId);
+            if (!loadout.IsValid()) throw new InvalidOperationException("This loadout is no longer available. Select an existing loadout and try again.");
+
             await Task.Run(async () =>
             {
                 await _syncService.Synchronize(_loadoutId);
             });
             
-            _notificationService.ShowToast(Language.ToastNotification_Applied__0__successfully, ToastNotificationVariant.Success);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+                _notificationService.ShowToast(Language.ToastNotification_Applied__0__successfully, ToastNotificationVariant.Success));
         }
         catch (ExecutableInUseException)
         {
             await MessageBoxOkViewModel.ShowGameAlreadyRunningError(_serviceProvider, loadout.Installation.Name);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogDebug("Applying loadout {LoadoutId} was cancelled", _loadoutId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error applying loadout {LoadoutId}", _loadoutId);
+            await MessageBoxOkViewModel.Show(_serviceProvider, "Could not apply changes", ex.Message);
         }
     }
 }

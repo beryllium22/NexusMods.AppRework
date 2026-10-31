@@ -51,6 +51,7 @@ $reworkData = Join-Path $localData 'NexusMods.AppRework'
 $originalBefore = Get-DirectoryState $originalData
 $associationBefore = Get-NxmRegistrationState
 $process = $null
+$discoveryProcess = $null
 
 try {
     # Exercise the published native host, service startup, database initialization,
@@ -62,6 +63,16 @@ try {
 
     $stdout = Get-Content (Join-Path $resultsPath 'stdout.log') -Raw
     if ($stdout -notmatch 'ProcessId:') { throw 'The published application did not execute its heartbeat command.' }
+
+    # Locator services are lazy and heartbeat does not construct them. Exercise the
+    # actual published Windows discovery pipeline; finding zero games is valid.
+    $discoveryProcess = Start-Process -FilePath (Join-Path $previewPath 'NexusMods.App.exe') -ArgumentList @('as-main', 'diagnose-game-discovery') -WorkingDirectory $previewPath -PassThru -RedirectStandardOutput (Join-Path $resultsPath 'game-discovery-stdout.log') -RedirectStandardError (Join-Path $resultsPath 'game-discovery-stderr.log')
+    if (-not $discoveryProcess.WaitForExit(120000)) { throw 'Published Windows game discovery did not finish within two minutes.' }
+    $discoveryProcess.WaitForExit()
+    if ($discoveryProcess.ExitCode -ne 0) { throw "Published Windows game discovery exited with code $($discoveryProcess.ExitCode)." }
+    $discoveryOutput = Get-Content (Join-Path $resultsPath 'game-discovery-stdout.log') -Raw
+    if ($discoveryOutput -notmatch 'GameDiscovery: OK') { throw 'The published application did not complete its game-discovery command.' }
+
     if (-not (Test-Path (Join-Path $reworkData 'Configs'))) { throw 'The fork did not create its independent configuration directory.' }
     if (-not (Test-Path (Join-Path $reworkData 'DataModel/MnemonicDB.rocksdb'))) { throw 'The fork did not initialize its independent database.' }
     if ((Get-DirectoryState $originalData) -cne $originalBefore) { throw 'Startup modified the original application data directory.' }
@@ -70,6 +81,7 @@ try {
     [ordered]@{
         nativeStartup = 'passed'
         heartbeat = 'passed'
+        gameDiscovery = 'passed'
         separateConfiguration = 'passed'
         separateDatabase = 'passed'
         originalDataUnchanged = 'passed'
@@ -78,8 +90,12 @@ try {
     } | ConvertTo-Json | Set-Content (Join-Path $resultsPath 'startup-check.json') -Encoding utf8
     Write-Output 'Published Windows startup and isolation checks passed.'
 } finally {
-    if ($null -ne $process -and -not $process.HasExited) {
-        $process.Kill($true)
-        $process.WaitForExit()
+    foreach ($startedProcess in @($process, $discoveryProcess)) {
+        if ($null -eq $startedProcess) { continue }
+        if (-not $startedProcess.HasExited) {
+            $startedProcess.Kill($true)
+            $startedProcess.WaitForExit()
+        }
+        $startedProcess.Dispose()
     }
 }

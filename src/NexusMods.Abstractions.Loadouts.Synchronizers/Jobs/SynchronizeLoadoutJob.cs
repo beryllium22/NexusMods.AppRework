@@ -12,6 +12,11 @@ namespace NexusMods.Abstractions.Loadouts.Synchronizers;
 public record SynchronizeLoadoutJob(LoadoutId LoadoutId, BindableReactiveProperty<string> StatusMessage) : IJobDefinition<Unit>
 {
     public SynchronizeLoadoutJob(LoadoutId loadoutId) : this(loadoutId, new BindableReactiveProperty<string>()) {}
+
+    /// <summary>
+    /// Cancellation of the active Apply job, including game-specific deployment tools.
+    /// </summary>
+    public CancellationToken CancellationToken { get; init; }
     
     public void SetStatus(string message)
     {

@@ -1,6 +1,7 @@
 <Project>
     <PropertyGroup>
         <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+        <NuGetAuditMode>all</NuGetAuditMode>
     </PropertyGroup>
 
     <PropertyGroup>

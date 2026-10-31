@@ -26,15 +26,7 @@ public record CollectionRevisionDiscarded : IGraphQlError<CollectionRevisionDisc
             Message = clientError.Message,
         };
 
-        var extensions = clientError.Extensions;
-        if (extensions is null) return true;
-
-        if (extensions.TryGetValue("revision_number", out var oRevisionNumber))
-        {
-            // TODO: figure out the type
-            Debugger.Break();
-        }
-
+        // Optional revision metadata is not needed to report this server error.
         return true;
     }
 }

@@ -66,6 +66,15 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
     private readonly IFileHashesService _fileHashService;
 
     /// <summary>
+    /// Games with an additional deployment step record completion only after that step succeeds.
+    /// The disk baseline is still recorded as files are synchronized.
+    /// </summary>
+    protected virtual bool RecordAppliedDateTime => true;
+
+    /// <inheritdoc />
+    public virtual bool HasPendingDeployment(Loadout.ReadOnly loadout) => false;
+
+    /// <summary>
     /// Loadout synchronizer base constructor.
     /// </summary>
     protected ALoadoutSynchronizer(
@@ -484,7 +493,8 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
         tx.Add(gameMetadataId, Sdk.Games.GameInstallMetadata.LastSyncedLoadout, loadout.Id);
         tx.Add(gameMetadataId, Sdk.Games.GameInstallMetadata.LastSyncedLoadoutTransaction, EntityId.From(tx.ThisTxId.Value));
         tx.Add(gameMetadataId, Sdk.Games.GameInstallMetadata.LastScannedDiskStateTransaction, EntityId.From(tx.ThisTxId.Value));
-        tx.Add(loadout.Id, Loadout.LastAppliedDateTime, DateTime.UtcNow);
+        if (RecordAppliedDateTime)
+            tx.Add(loadout.Id, Loadout.LastAppliedDateTime, DateTime.UtcNow);
         await tx.Commit();
 
         loadout = loadout.Rebase();
@@ -980,8 +990,14 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
     }
 
     /// <inheritdoc />
-    public virtual async Task<Loadout.ReadOnly> Synchronize(Loadout.ReadOnly loadout, SynchronizeLoadoutJob? job = null)
+    public virtual Task<Loadout.ReadOnly> Synchronize(Loadout.ReadOnly loadout, SynchronizeLoadoutJob? job = null)
+        => SynchronizeFiles(loadout, job);
+
+    /// <inheritdoc />
+    public async Task<Loadout.ReadOnly> SynchronizeFiles(Loadout.ReadOnly loadout, SynchronizeLoadoutJob? job = null)
     {
+        var cancellationToken = job?.CancellationToken ?? CancellationToken.None;
+        cancellationToken.ThrowIfCancellationRequested();
         loadout = loadout.Rebase();
         
         // Update locator IDs before building the sync tree
@@ -994,8 +1010,9 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
             var prevLoadout = Loadout.Load(loadout.Db, lastAppliedId);
             if (prevLoadout.IsValid())
             {
-                await _loadoutManager.DeactivateCurrentLoadout(loadout.InstallationInstance);
-                await _loadoutManager.ActivateLoadout(loadout);
+                await _loadoutManager.DeactivateCurrentLoadout(loadout.InstallationInstance, cancellationToken);
+                await _loadoutManager.ActivateLoadout(loadout, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 return loadout.Rebase();
             }
         }
@@ -1003,7 +1020,11 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
         job?.SetStatus("Collecting files");
         var tree = await BuildSyncTree(loadout);
         ProcessSyncTree(tree);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Finish an in-progress file transaction before honoring cancellation, so its disk
+        // baseline remains accurate. Game-specific tools receive the same token separately.
         loadout = await RunActions(tree, loadout, job);
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Move any override files that now match game files after sync
         loadout = await ReprocessOverrides(loadout);
@@ -1326,10 +1347,12 @@ public partial class ALoadoutSynchronizer : ILoadoutSynchronizer
 
     public async ValueTask BuildProcessRun(Loadout.ReadOnly loadout, GameInstallMetadata.ReadOnly state, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var diskStateEntries = DiskStateEntry.FindByGame(state.Db, state);
         var tree = BuildSyncTree(DiskStateToPathPartPair(diskStateEntries), DiskStateToPathPartPair(diskStateEntries), loadout);
         ProcessSyncTree(tree);
         await RunActions(tree, loadout);
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     /// <inheritdoc />

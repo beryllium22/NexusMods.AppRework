@@ -8,6 +8,15 @@ namespace NexusMods.DataModel.Tests;
 public class SortTests
 {
     [Fact]
+    public void EmptyCollectionsHaveAnEmptySortOrder()
+    {
+        var sorter = new Sorter();
+        sorter.Sort<Item, string>([], x => x.Id, x => x.Rules).Should().BeEmpty();
+        sorter.Sort<Item, string, Item[]>([], x => x.Id, x => x.Rules).Should().BeEmpty();
+        sorter.SortWithEnumerable<Item, string>(Enumerable.Empty<Item>(), x => x.Id, x => x.Rules).Should().BeEmpty();
+    }
+
+    [Fact]
     public void CyclicDependency()
     {
         var items = new List<Item>()

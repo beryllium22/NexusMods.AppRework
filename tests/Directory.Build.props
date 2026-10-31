@@ -5,6 +5,14 @@
         <IsPackable>false</IsPackable>
     </PropertyGroup>
 
+    <!-- Older test helpers depend on NETStandard.Library 1.6.1. Keep their
+         transitive packages on patched versions without changing app dependencies. -->
+    <ItemGroup>
+        <PackageReference Include="System.Net.Http" />
+        <PackageReference Include="System.Text.RegularExpressions" />
+        <PackageReference Include="System.Text.Json" />
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="NSubstitute" />
         <PackageReference Include="NSubstitute.Analyzers.CSharp"/>

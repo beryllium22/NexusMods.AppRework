@@ -78,12 +78,23 @@ release downloads as updates. Download a newer successful preview when needed.
 
 The Windows pipeline builds the solution, runs the eligible automated tests,
 publishes the x64 app with its runtime, and launches its native executable to
-check service/database startup. That launch also checks that original application
-data and the current Nexus link association remain unchanged. Interactive GUI,
+check service/database startup and actual game-locator construction/enumeration.
+Zero installed games is a valid discovery result. Both checks also verify that
+original application data and the current Nexus link association remain unchanged. Interactive GUI,
 browser authentication, and real-game install/apply/launch checks remain separate
-validation work.
+validation work. See the [stability record](STABILITY.md) for addressed failures,
+regression coverage, and remaining limitations.
+
+To run the read-only discovery check locally while the app is closed:
+
+```powershell
+.\NexusMods.App.exe as-main diagnose-game-discovery
+```
+
+A successful run prints `GameDiscovery: OK` after enumerating all registered
+locators. Include its output and the app log when reporting a discovery problem.
 
 Source, issues, and development progress:
 [beryllium22/NexusMods.AppRework](https://github.com/beryllium22/NexusMods.AppRework).
-See `LICENSE.md`, `PORTS-AND-ROADMAP.md`, and `BUILD-INFO.json` in the preview for
+See `LICENSE.md`, `PORTS-AND-ROADMAP.md`, `STABILITY.md`, and `BUILD-INFO.json` in the preview for
 licensing, port attribution, and build provenance.

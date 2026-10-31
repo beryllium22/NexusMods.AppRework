@@ -48,6 +48,26 @@ The build foundation replaces the upstream reusable clean-test workflow with loc
 
 These local changes extend the attributed ports. The [Windows preview guide](WINDOWS_PREVIEW.md) explains how to run the build and what its checks cover.
 
+### Stability increment
+
+The [stability record](STABILITY.md) tracks confirmed failure mechanisms, regression
+coverage, and the limits of the evidence. This increment adds Windows discovery
+checks, missing-installation handling, reliable REDmod completion/retry state,
+shutdown lifetime management, dialog and login fixes, and additional HTTP edge cases.
+
+| Source and contributor | Reviewed work | Treatment here |
+| --- | --- | --- |
+| [upstream PR #4192](https://github.com/Nexus-Mods/NexusMods.App/pull/4192), AntiqueNexus, head [`a0a22676`](https://github.com/Nexus-Mods/NexusMods.App/commit/a0a22676d7827d1a89c62ba7d8b27e9ce40b8d6a) | Windows registry registration, unresolved installations in reactive lists, and duplicate catalog domains. | Adapt to this fork; add DI, live-list, parser, and published discovery regressions. Extend registry matching to distinguish installed copies by path. |
+| [`fb75a84c`](https://github.com/Jeagermeister/Apocrypha/commit/fb75a84c721f0970984e8f64709b990cc057fbd6), Jeagermeister | No-log process execution checks the stdout pipe twice. | Correct the stderr check in the Windows-capable runner retained here. |
+| [`d57ba3c9`](https://github.com/Jeagermeister/Apocrypha/commit/d57ba3c95698ab6480f220598909762038c2905c) | Launch errors need visible feedback, window transactions need completion, and discarded-revision parsing must not break into a debugger. | Port these bounded behaviors with tests; marshal UI updates and avoid capturing the UI context while waiting for window commits. Other changes in that commit are reviewed independently. |
+| [`97d10a37`](https://github.com/Jeagermeister/Apocrypha/commit/97d10a376e66b53c6b86c26aae823328db692e48) | Cancelling login should cancel its underlying job. | Use this fork's job context; serialize cancel/close and ignore repeated or late commands. |
+
+The empty-sort fix, overlay serialization, tracked sort-order shutdown, pause/cancel
+state correction, REDmod deployment state, and additional downloader regressions
+are local adaptations or implementations. The two REDmod schema attributes are
+additive; they do not repair existing collection data. Dependency changes keep
+the existing test-tool licenses and use supported patched runtime packages.
+
 ### Further ports to evaluate
 
 1. Repair of previously corrupted collection `TargetPath` records. Prevention is implemented; test removal, migration, and recovery against archived real-schema databases before adopting repair logic.
@@ -66,8 +86,8 @@ For every port, record source SHA/license, inspect dependencies and migrations, 
 - Windows compiles, tests, publishes, and starts from a clean checkout with documented public inputs and no developer credentials. Retain Linux compilation/tests for shared-code compatibility.
 - Download failures, pauses, changed resources, ignored ranges, and truncated bodies cannot silently become successful corrupted archives.
 - Install/apply failures preserve recoverable state and produce useful errors. This is a separate gate from HTTP tests.
-- Next Windows integration target: Cyberpunk REDmod install → Apply → Launch. `MissingRedModEmitter` currently checks deployed directories, and `Cyberpunk2077Synchronizer` can return normally after file synchronization when `redmod.exe` is missing. Verify pending enabled mods before Apply, represent deployment failure accurately, and test successful retry with a controlled process runner before certifying this workflow.
-- Review dependencies and bundled binaries. Initial restore reports advisory [GHSA-4625-4j76-fww9](https://github.com/advisories/GHSA-4625-4j76-fww9) for inherited `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.12.0; resolve before release.
+- Next Windows integration target: Cyberpunk REDmod install → Apply → Launch. Pending enabled mods and deployment failures now have explicit handling and controlled-runner regression coverage. Real REDmod/game/version validation remains required before certifying this workflow.
+- Review dependencies and bundled binaries. This increment updates OpenTelemetry to 1.15.3 for [GHSA-4625-4j76-fww9](https://github.com/advisories/GHSA-4625-4j76-fww9), patches the inherited D-Bus dependency, and enables transitive restore auditing. See the stability record for build/test dependency decisions.
 - Establish public name, icons, package IDs, data paths, update feed, support destinations, telemetry behavior, and API identity, with an explicit data migration plan.
 - Define maintenance/source policy for game hashes and game metadata. Their present upstream availability is not a long-term guarantee.
 

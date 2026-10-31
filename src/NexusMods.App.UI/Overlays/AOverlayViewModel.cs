@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using Avalonia.Threading;
 using NexusMods.UI.Sdk;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
@@ -31,20 +31,23 @@ where TInner : class, IViewModelInterface
     [Reactive] 
     public Status Status { get; set; }
 
-    private readonly TaskCompletionSource _taskCompletionSource = new();
+    private readonly TaskCompletionSource _taskCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task CompletionTask => _taskCompletionSource.Task;
 
     public virtual void Close()
     {
-        Debug.Assert(Controller != null, "Controller != null");
-        if (Status == Status.Closed)
+        Dispatcher.UIThread.Invoke(() =>
         {
-            return;
-        }
-        
-        Controller.Remove(this);
-        Status = Status.Closed;
-        _taskCompletionSource.SetResult();
+            if (Status == Status.Closed)
+            {
+                _taskCompletionSource.TrySetResult();
+                return;
+            }
+
+            _controller?.Remove(this);
+            Status = Status.Closed;
+            _taskCompletionSource.TrySetResult();
+        });
     }
 }
 
@@ -55,7 +58,14 @@ public abstract class AOverlayViewModel<TInterface, TResult> : AOverlayViewModel
     
     public void Complete(TResult result)
     {
-        Result = result;
-        Close();
+        Dispatcher.UIThread.Invoke(() =>
+        {
+            // Select the result and close as one UI operation. A second response must
+            // not replace the first while an asynchronous completion is being observed.
+            if (Status == Status.Closed) return;
+
+            Result = result;
+            Close();
+        });
     }
 }

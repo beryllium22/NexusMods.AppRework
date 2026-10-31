@@ -278,13 +278,20 @@ internal partial class LoadoutManager : ILoadoutManager
 
     public async ValueTask DeactivateCurrentLoadout(GameInstallation installation, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var metadata = _gameRegistry.ForceGetMetadata(installation);
         var synchronizer = installation.GetGame().Synchronizer;
 
         if (!metadata.Contains(GameInstallMetadata.LastSyncedLoadout)) return;
 
-        // Synchronize the last applied loadout, so we don't lose any changes
-        await synchronizer.Synchronize(Loadout.Load(_connection.Db, metadata.LastSyncedLoadout));
+        // Preserve external file changes without retrying a failed deployment of the loadout
+        // being left. Deployment completion is tracked independently from this disk baseline.
+        var previousLoadout = Loadout.Load(_connection.Db, metadata.LastSyncedLoadout);
+        await synchronizer.SynchronizeFiles(previousLoadout, new SynchronizeLoadoutJob(previousLoadout.LoadoutId)
+        {
+            CancellationToken = cancellationToken,
+        });
+        cancellationToken.ThrowIfCancellationRequested();
 
         var metadataLocatorIds = installation.LocatorResult.LocatorIds;
         var locatorIds = metadataLocatorIds.Distinct().ToArray();
@@ -295,6 +302,7 @@ internal partial class LoadoutManager : ILoadoutManager
         }
 
         await synchronizer.ResetToOriginalGameState(installation, locatorIds);
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     public Optional<LoadoutId> GetCurrentlyActiveLoadout(GameInstallation installation)
@@ -393,17 +401,21 @@ internal partial class LoadoutManager : ILoadoutManager
         ITransaction? inputTx,
         Optional<LoadoutItemGroupId> parent = default,
         ILibraryItemInstaller? installer = null,
-        ILibraryItemInstaller? fallbackInstaller = null)
+        ILibraryItemInstaller? fallbackInstaller = null,
+        bool useDefaultCollection = true,
+        bool addPriority = true)
     {
         var mainTransaction = inputTx is null ? _connection.BeginTransaction() : null;
         var tx = inputTx ?? mainTransaction!;
 
-        var job = InstallLoadoutItemJob.Create(_serviceProvider, libraryItem, targetLoadout, tx, groupId: parent, installer: installer, fallbackInstaller: fallbackInstaller);
+        var job = InstallLoadoutItemJob.Create(_serviceProvider, libraryItem, targetLoadout, tx,
+            groupId: parent, installer: installer, fallbackInstaller: fallbackInstaller, useDefaultCollection: useDefaultCollection);
         return _jobMonitor.Begin(job, async context =>
         {
             var result = await job.StartAsync(context);
             var targetId = result.GroupTxId;
-            tx.Add(new AddPriorityTxFunc(targetLoadout, targetId));
+            if (addPriority)
+                tx.Add(new AddPriorityTxFunc(targetLoadout, targetId));
 
             if (mainTransaction is null) return new InstallLoadoutItemJobResult(null, targetId);
 
@@ -563,9 +575,44 @@ internal partial class LoadoutManager : ILoadoutManager
 
     public async ValueTask ReplaceItems(LoadoutId loadoutId, LoadoutItemGroupId[] groupsToRemove, LibraryItem.ReadOnly libraryItemToInstall)
     {
+        var db = _connection.Db;
+        var groups = groupsToRemove.Distinct()
+            .Select(id => LoadoutItemGroup.Load(db, id))
+            .Where(group => group.IsValid())
+            .ToArray();
+        if (groups.Length == 0) return;
+
+        var nextPriority = GetNextPriority(loadoutId, db).Value;
         using var tx = _connection.BeginTransaction();
-        RemoveItems(tx, groupsToRemove);
-        await InstallItem(libraryItemToInstall, loadoutId, inputTx: tx);
+        foreach (var group in groups)
+        {
+            var item = group.AsLoadoutItem();
+            var priorities = LoadoutItemGroupPriority.FindByTarget(db, group.LoadoutItemGroupId).ToArray();
+            tx.Delete(group.Id, recursive: true);
+            foreach (var priority in priorities)
+                tx.Delete(priority.Id, recursive: false);
+
+            var parent = item.HasParent()
+                ? Optional<LoadoutItemGroupId>.Create(item.Parent.LoadoutItemGroupId)
+                : Optional<LoadoutItemGroupId>.None;
+            var replacement = await InstallItem(libraryItemToInstall, loadoutId, inputTx: tx,
+                parent: parent, useDefaultCollection: false, addPriority: false);
+
+            // Preserve the item's own setting; a disabled collection must continue
+            // to control its children through inheritance rather than disabling them individually.
+            if (item.IsDisabled)
+                tx.Add(replacement.GroupTxId, LoadoutItem.Disabled, Null.Instance);
+
+            // Keep conflict order and create a distinct record for every replacement.
+            // AddPriorityTxFunc is intended for a single install in a transaction.
+            _ = new LoadoutItemGroupPriority.New(tx)
+            {
+                LoadoutId = loadoutId,
+                TargetId = replacement.GroupTxId,
+                Priority = priorities.Length > 0 ? priorities[0].Priority : ConflictPriority.From(nextPriority++),
+            };
+        }
+
         await tx.Commit();
     }
 

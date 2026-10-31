@@ -1,5 +1,4 @@
 using System.Collections.Frozen;
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -62,6 +61,26 @@ internal class LocalMappingCache : IGameDomainToGameIdMappingCache
             using var stream = typeof(LocalMappingCache).Assembly.GetManifestResourceStream(name: "games.json");
             if (stream is null) return false;
 
+            return TryParseJson(stream, logger, out gameIdToDomain, out gameDomainToId);
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "Exception reading games.json file");
+            return false;
+        }
+    }
+
+    internal static bool TryParseJson(
+        Stream stream,
+        ILogger logger,
+        [NotNullWhen(true)] out FrozenDictionary<NexusModsGameId, GameDomain>? gameIdToDomain,
+        [NotNullWhen(true)] out FrozenDictionary<GameDomain, NexusModsGameId>? gameDomainToId)
+    {
+        gameIdToDomain = null;
+        gameDomainToId = null;
+
+        try
+        {
             var results = JsonSerializer.Deserialize<GameMetadata[]>(stream, SerializerOptions);
             if (results is null || results.Length == 0) return false;
 
@@ -71,7 +90,14 @@ internal class LocalMappingCache : IGameDomainToGameIdMappingCache
 
             gameIdToDomain = pairs.DistinctBy(tuple => tuple.Id).ToFrozenDictionary(tuple => tuple.Id, tuple => tuple.Domain);
             gameDomainToId = pairs.DistinctBy(tuple => tuple.Domain).ToFrozenDictionary(tuple => tuple.Domain, tuple => tuple.Id);
-            Debug.Assert(gameIdToDomain.Count == gameDomainToId.Count);
+            // The upstream catalog can contain more than one ID for a domain.
+            // Keep all ID lookups and the first reverse mapping, as before; an
+            // external data inconsistency must not terminate a Debug build.
+            if (gameIdToDomain.Count != pairs.Length || gameDomainToId.Count != pairs.Length)
+            {
+                logger.LogWarning("Duplicate keys in games.json: {Entries} entries, {Ids} game IDs, {Domains} domains. Using the first mapping for each key.",
+                    pairs.Length, gameIdToDomain.Count, gameDomainToId.Count);
+            }
             return true;
         }
         catch (Exception e)

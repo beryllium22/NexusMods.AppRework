@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using NexusMods.Sdk.Settings;
 using NexusMods.Abstractions.Diagnostics;
 using NexusMods.Abstractions.GC;
@@ -40,6 +41,7 @@ public static class Services
     public static IServiceCollection AddDataModel(this IServiceCollection coll)
     {
         coll.AddMnemonicDB();
+        coll.AddQueryLifetime();
         coll.AddMigrations();
 
         coll.AddAmbientQueriesSql();
@@ -118,4 +120,7 @@ public static class Services
 
         return coll;
     }
+
+    internal static IServiceCollection AddQueryLifetime(this IServiceCollection services)
+        => services.AddHostedService<QueryLifetimeHostedService>();
 }

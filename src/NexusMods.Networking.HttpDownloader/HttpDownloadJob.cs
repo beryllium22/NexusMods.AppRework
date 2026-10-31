@@ -127,6 +127,11 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
             cancellationToken: context.CancellationToken
         );
 
+        // Some servers advertise ranges but reject a particular resume request. Repeating
+        // that offset cannot recover; let the retry pipeline request the complete file.
+        if (isRangeRequest && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+            throw ResetAfterInvalidResponse("The server rejected the resume range; retrying the complete download");
+
         response.EnsureSuccessStatusCode();
 
         if (response.StatusCode == HttpStatusCode.OK)
@@ -217,11 +222,8 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
         if (_state.ContentLength.HasValue && finalPosition != (long)_state.ContentLength.Value.Value)
             throw ResetAfterInvalidResponse($"Download wrote {finalPosition} bytes but expected {_state.ContentLength.Value.Value}");
 
-        // Ensure progress is set to 100% when download completes
-        if (_state.ContentLength.HasValue)
-            context.SetPercent(_state.ContentLength.Value, _state.ContentLength.Value);
-        else
-            context.SetPercent(Size.One, Size.One);
+        // Completion also applies to an empty representation: 0 / 0 would report 0%.
+        context.SetPercent(Size.One, Size.One);
 
         return Destination;
     }
@@ -280,6 +282,18 @@ public record HttpDownloadJob : IJobDefinitionWithStart<HttpDownloadJob, Absolut
             completionOption: HttpCompletionOption.ResponseHeadersRead,
             cancellationToken: context.CancellationToken
         ).ConfigureAwait(false);
+
+        if (response.StatusCode is HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented)
+        {
+            // HEAD is an optional metadata probe for our downloader. A method-specific
+            // rejection must not prevent a valid GET, but its error-page headers cannot
+            // validate an existing prefix. Restart with no conditional or range headers.
+            _state.TotalBytesDownloaded = Size.Zero;
+            _state.AcceptRanges = false;
+            _state.ETag = Optional<EntityTagHeaderValue>.None;
+            _state.ContentLength = Optional<Size>.None;
+            return;
+        }
 
         response.EnsureSuccessStatusCode();
 
