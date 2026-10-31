@@ -52,7 +52,7 @@ public partial class DialogWindow : ReactiveWindow<IDialogViewModel>, IDisposabl
                     )
                     .DisposeWith(disposables);
                 
-                GenerateButtons();
+                GenerateButtons(disposables);
                
                 
                 this.WhenAnyValue(view => view.ViewModel!.ShowChrome)
@@ -75,12 +75,12 @@ public partial class DialogWindow : ReactiveWindow<IDialogViewModel>, IDisposabl
             // Bind the CloseCommand to the Window's close action
             _serialDisposable.Disposable = ViewModel!.ButtonPressCommand.Subscribe( id => 
             {
-                Close();
+                if (id != ButtonDefinitionId.None) Close();
             });
         };
     }
     
-    private void GenerateButtons()
+    private void GenerateButtons(System.Reactive.Disposables.CompositeDisposable disposables)
     {
         if (ViewModel is null) return;
         
@@ -120,6 +120,15 @@ public partial class DialogWindow : ReactiveWindow<IDialogViewModel>, IDisposabl
                     _ => StandardButton.ShowIconOptions.None
                 },
             };
+
+            if (buttonDefinition.ButtonAction == ButtonAction.Accept
+                && ViewModel.ContentViewModel is IDialogStandardContentViewModel content)
+            {
+                content.WhenAnyValue(vm => vm.IsInputValid)
+                    .OnUI()
+                    .Subscribe(valid => button.IsEnabled = valid)
+                    .DisposeWith(disposables);
+            }
 
             switch (buttonDefinition.ButtonStyling)
             {

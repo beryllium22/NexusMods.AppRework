@@ -71,6 +71,12 @@ For developers, the existing explicit command is also available:
 Run the command while the app is closed. It associates links once; the setting
 controls whether the app registers on future starts.
 
+## Profiles and experimental games
+
+Use **Profiles** to name, duplicate, rename, search, and organize mod setups. A duplicate preserves collections, conflict priorities, and game load orders while starting unapplied. Open the profile to manage mods and apply changes before launching. Profiles do not automatically isolate game saves.
+
+On **My Games**, enable **Show experimental games** to expose Skyrim SE/Anniversary, Fallout 4, Witcher 3, and other experimental integrations. The setting updates the page immediately; experimental labels remain visible. Start with a disposable installation and a small local mod archive. The [feature and compatibility guide](FEATURES_AND_COMPATIBILITY.md) describes archive formats, dependency validation, restoration behavior, and current limits.
+
 ## Updates and test coverage
 
 Preview builds use manual update mode. They do not offer the original app's
@@ -96,5 +102,5 @@ locators. Include its output and the app log when reporting a discovery problem.
 
 Source, issues, and development progress:
 [beryllium22/NexusMods.AppRework](https://github.com/beryllium22/NexusMods.AppRework).
-See `LICENSE.md`, `PORTS-AND-ROADMAP.md`, `STABILITY.md`, and `BUILD-INFO.json` in the preview for
+See `LICENSE.md`, `PORTS-AND-ROADMAP.md`, `STABILITY.md`, `FEATURES_AND_COMPATIBILITY.md`, and `BUILD-INFO.json` in the preview for
 licensing, port attribution, and build provenance.

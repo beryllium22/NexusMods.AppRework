@@ -24,8 +24,7 @@ The mod **{PluginName}** requires **{MissingMasterPluginName}** to function, but
 
 This means the plugin can’t find one of its required “master files.” Masters contain important data that other mods depend on—without them, the plugin is left pointing to records that don’t exist.
 
-If you try to launch the game in this state, it won’t start. Bethesda games stop loading when a master is missing to prevent crashes, broken saves, or corrupted load orders. 
-To fix this, you’ll need to install the missing master before playing.
+Applying this profile is blocked until the required master is available. Install the missing master, or disable the plugin that requires it, before playing.
 """)
         .WithMessageData(messageBuilder => messageBuilder
             .AddDataReference<LoadoutItemGroupReference>("Mod")
@@ -49,16 +48,34 @@ mod **{MissingMasterMod}** provides this file, but it is disabled. Enable the mo
 
 This means the plugin can’t find one of its required “master files.” Masters contain important data that other mods depend on—without them, the plugin is left pointing to records that don’t exist.
 
-If you try to launch the game in this state, it won’t start. Bethesda games stop loading when a master is missing to prevent crashes, broken saves, or corrupted load orders. 
-To fix this, you’ll need to install the missing master before playing.
+Applying this profile is blocked until the required master is available. Enable the mod or plugin that supplies the master, or disable the plugin that requires it, before playing.
 """)
         .WithMessageData(messageBuilder => messageBuilder
             .AddDataReference<LoadoutItemGroupReference>("Mod")
             .AddValue<ModKey>("PluginName")
             .AddValue<ModKey>("MissingMasterPluginName")
-            .AddValue<LoadoutItemGroupReference>("MissingMasterMod")
+            .AddDataReference<LoadoutItemGroupReference>("MissingMasterMod")
         )
         .Finish();
 
-  
+    [DiagnosticTemplate]
+    [UsedImplicitly]
+    internal static IDiagnosticTemplate PluginLoadOrderProblem = DiagnosticTemplateBuilder
+        .Start()
+        .WithId(new DiagnosticId(Source, number: 3))
+        .WithTitle("Plugin load order needs attention")
+        .WithSeverity(DiagnosticSeverity.Critical)
+        .WithSummary("{PluginName}: {Problem}")
+        .WithDetails("""
+{Problem}
+
+The profile cannot be applied until this plugin problem is resolved. Check the mod's requirements and installation instructions, restore a valid copy of an unreadable plugin, or disable the affected mod.
+
+Header checks cover required masters and the game's fixed master ordering. They do not replace a compatibility review or LOOT metadata.
+""")
+        .WithMessageData(messageBuilder => messageBuilder
+            .AddDataReference<LoadoutReference>("Loadout")
+            .AddValue<string>("PluginName")
+            .AddValue<string>("Problem"))
+        .Finish();
 }

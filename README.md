@@ -6,11 +6,13 @@ This repository is `beryllium22/NexusMods.AppRework`. It is not an official Nexu
 
 ## Current status
 
-**Development alpha.** The inherited application contains a native Avalonia interface, mod library, loadouts, collections, downloads, game discovery, installers, and file conflict handling. The rework starts by making these workflows reliable and maintainable.
+**Development alpha.** The inherited application contains a native Avalonia interface, mod library, loadouts, collections, downloads, game discovery, installers, and file conflict handling. The rework is improving these workflows and expanding experimental Windows game compatibility.
 
 Continuation changes address interrupted HTTP downloads, game-file queries, collection installation and copying, publication-state persistence, and independent build checks. Fresh defaults use separate App Rework storage, and Nexus link registration is opt-in. See the [roadmap and port record](docs/REWORK_ROADMAP.md) for scope, provenance, and release gates.
 
-The original project documented support for Stardew Valley, Cyberpunk 2077, Baldur's Gate 3, and Mount & Blade II: Bannerlord. These are inherited integrations, **not a fresh compatibility certification for current game versions**. Skyrim Special Edition and Fallout 4 code is experimental and incomplete.
+The original project documented support for Stardew Valley, Cyberpunk 2077, Baldur's Gate 3, and Mount & Blade II: Bannerlord. These are inherited integrations, **not a fresh compatibility certification for current game versions**. Skyrim Special Edition/Anniversary and Fallout 4 now have experimental archive installation and plugin validation, and Witcher 3 has an initial Mods/DLC integration. See the [feature and compatibility guide](docs/FEATURES_AND_COMPATIBILITY.md) for implemented behavior and boundaries.
+
+The **Profiles** page adds named creation, duplication, renaming, search, sorting, and live apply status. Collection installs preserve completed work for retry, and FOMOD sessions validate their recorded choices. Enable **Show experimental games** on My Games to find the new game integrations. These changes remain subject to real-game validation.
 
 ## Try the Windows development preview
 

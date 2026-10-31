@@ -11,6 +11,7 @@ public interface IGameWidgetViewModel : IViewModelInterface
 {
     public GameInstallation? Installation { get; set; }
     public string Name { get; }
+    public bool IsExperimental { get; set; }
     public string Version { get; }
     public string Store { get; }
     public IconValue GameStoreIcon { get; }

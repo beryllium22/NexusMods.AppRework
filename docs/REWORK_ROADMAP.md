@@ -8,7 +8,7 @@ Reviewed on **2026-10-31**. This is a development plan and provenance record, no
 - Baseline: [`48284f38c2d91e53904b41093090fbaa8b5113ed`](https://github.com/beryllium22/NexusMods.AppRework/commit/48284f38c2d91e53904b41093090fbaa8b5113ed), dated 2025-11-19. The fork initially had one branch and no additional development commits.
 - Nexus Mods [announced the end of App development on 2026-01-14](https://help.nexusmods.com/article/164-discontinuing-the-nexus-mods-app-faq). Its [repository](https://github.com/Nexus-Mods/NexusMods.App) was archived on 2026-02-20.
 - The application uses C#/.NET 9 and Avalonia, with reactive UI/job services, MnemonicDB state, content-addressed archive storage, per-game installers and synchronizers, collections, FOMOD, and Steam/GOG/Epic-related discovery.
-- The inherited user guide documents Stardew Valley, Cyberpunk 2077, Baldur's Gate 3, and Bannerlord. Creation Engine integrations remain unfinished: `MissingMasterEmitter.Diagnose(loadout, cancellationToken)` throws `NotImplementedException`, for example.
+- The inherited user guide documents Stardew Valley, Cyberpunk 2077, Baldur's Gate 3, and Bannerlord. At the starting baseline, Creation Engine integrations were unfinished; the ordinary missing-master diagnostic entry point still threw `NotImplementedException`. The current feature increment completes that path and adds bounded experimental installation/deployment support.
 
 The first goal is a trustworthy **Windows x64 mod manager** for an explicitly tested set of games. Existing Linux CI checks remain for shared-code compatibility; Windows installation, usability, and game validation have priority. Additional game modules follow demonstrated end-to-end reliability.
 
@@ -68,11 +68,17 @@ are local adaptations or implementations. The two REDmod schema attributes are
 additive; they do not repair existing collection data. Dependency changes keep
 the existing test-tool licenses and use supported patched runtime packages.
 
+### Profiles and game-compatibility increment
+
+The [feature and compatibility guide](FEATURES_AND_COMPATIBILITY.md) records the current work: independent atomic profile copies, a clearer Profiles page, resumable collection attempts, per-session FOMOD state, recursive disabled ancestry, experimental Skyrim/Fallout plugin handling, and an initial Witcher 3 installer. My Games exposes an explicit experimental toggle and labels. The stable game allowlist remains unchanged.
+
+Retained initial disk baselines and required pre-overwrite backups protect uncatalogued original files for the three new experimental targets. Real game/collection validation, LOOT metadata, independent plugin activation/order editing, Witcher merging/order settings, and durable job recovery remain separate milestones. This work is locally implemented; factual game-layout constants and primary sources are attributed in the guide.
+
 ### Further ports to evaluate
 
 1. Repair of previously corrupted collection `TargetPath` records. Prevention is implemented; test removal, migration, and recovery against archived real-schema databases before adopting repair logic.
 2. Interrupted loadout-switch recovery. Terminate between filesystem/database operations and verify that recovery preserves user files and the selected loadout.
-3. FOMOD destination validation. Review traversal, absolute paths, Windows drives/UNC paths, alternate data streams, and symlinks across platforms.
+3. Continue installer path review. FOMOD relative destinations now reject traversal and drive/stream syntax; full extraction and symlink behavior still needs cross-platform review.
 4. Store/game discovery improvements. Require per-store fixtures and realistic game-version tests; advertised game counts are not verified compatibility.
 
 For every port, record source SHA/license, inspect dependencies and migrations, retain attribution, and review both platforms. Never import credentials or assume access to another project's private infrastructure.

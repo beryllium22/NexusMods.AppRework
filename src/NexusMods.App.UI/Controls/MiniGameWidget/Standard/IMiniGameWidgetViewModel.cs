@@ -13,6 +13,7 @@ public interface IMiniGameWidgetViewModel : IViewModelInterface
     public GameInstallation[]? GameInstallations { get; set; }
     public string Name { get; set; }
     public bool IsFound { get; set; }
+    public bool IsExperimental { get; set; }
     public Bitmap Image { get; }
     public ReactiveCommand<Unit, Unit> GiveFeedbackCommand { get; }
 }

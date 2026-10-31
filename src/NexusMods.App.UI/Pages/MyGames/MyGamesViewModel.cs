@@ -19,6 +19,7 @@ using NexusMods.MnemonicDB.Abstractions;
 using OneOf;
 using OneOf.Types;
 using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
 using System.Reactive;
 using System.Reactive.Linq;
 using DynamicData.Aggregation;
@@ -72,6 +73,7 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
     public ReactiveCommand<Unit, Unit> OpenRoadmapCommand { get; }
     public ReadOnlyObservableCollection<IGameWidgetViewModel> InstalledGames => _installedGames;
     public ReadOnlyObservableCollection<IViewModelInterface> SupportedGames => _supportedGames;
+    [Reactive] public bool ShowExperimentalGames { get; set; }
 
     public MyGamesViewModel(
         IWindowManager windowManager,
@@ -85,6 +87,7 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
     {
         var settingsManager = serviceProvider.GetRequiredService<ISettingsManager>();
         var experimentalSettings = settingsManager.Get<ExperimentalSettings>();
+        ShowExperimentalGames = experimentalSettings.EnableAllGames;
 
         var libraryDataProviders = serviceProvider.GetServices<ILibraryDataProvider>().ToArray();
 
@@ -111,18 +114,35 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
 
         this.WhenActivated(d =>
             {
-                gameRegistry.LocateGameInstallations()
-                    .Where(game =>
+                var settingsChanges = R3.ObservableExtensions.AsSystemObservable(
+                        settingsManager.GetChanges<ExperimentalSettings>(prependCurrent: true))
+                    .OnUI()
+                    .Replay(1)
+                    .RefCount();
+
+                settingsChanges.Select(settings => settings.EnableAllGames)
+                    .DistinctUntilChanged()
+                    .Subscribe(value => ShowExperimentalGames = value)
+                    .DisposeWith(d);
+                this.WhenAnyValue(vm => vm.ShowExperimentalGames)
+                    .Skip(1)
+                    .DistinctUntilChanged()
+                    .Subscribe(value =>
                     {
-                        if (experimentalSettings.EnableAllGames) return true;
-                        return experimentalSettings.SupportedGames.Contains(game.Game.GameId);
+                        if (settingsManager.Get<ExperimentalSettings>().EnableAllGames != value)
+                            settingsManager.Update<ExperimentalSettings>(settings => settings with { EnableAllGames = value });
                     })
+                    .DisposeWith(d);
+
+                var installations = gameRegistry.LocateGameInstallations().ToArray();
+                installations
                     .ToReadOnlyObservableCollection()
                     .ToObservableChangeSet()
                     .Transform(installation =>
                         {
                             var vm = _serviceProvider.GetRequiredService<IGameWidgetViewModel>();
                             vm.Installation = installation;
+                            vm.IsExperimental = !experimentalSettings.SupportedGames.Contains(installation.Game.GameId);
 
                             vm.AddGameCommand = ReactiveCommand.CreateFromTask(async () => await AddGameHandler(installation, vm));
 
@@ -179,20 +199,18 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
                             return vm;
                         }
                     )
+                    .Filter(settingsChanges.Select(settings => new Func<IGameWidgetViewModel, bool>(vm =>
+                        settings.EnableAllGames || !vm.IsExperimental)))
                     .OnUI()
                     .Bind(out _installedGames)
                     .SubscribeWithErrorLogging()
                     .DisposeWith(d);
+                this.RaisePropertyChanged(nameof(InstalledGames));
 
                 var supportedGamesAsIGame = serviceProvider
                     .GetServices<IGameData>()
-                    .Where(game =>
-                    {
-                        if (experimentalSettings.EnableAllGames) return true;
-                        return experimentalSettings.SupportedGames.Contains(game.GameId);
-                    })
                     .Cast<IGame>()
-                    .Where(game => _installedGames.All(install => install.Installation?.GetGame().GameId != game.GameId)); // Exclude found games
+                    .Where(game => installations.All(installation => installation.Game.GameId != game.GameId));
 
                 var miniGameWidgetViewModels = supportedGamesAsIGame
                     .Select(game =>
@@ -200,6 +218,7 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
                             var vm = _serviceProvider.GetRequiredService<IMiniGameWidgetViewModel>();
                             vm.Game = game;
                             vm.Name = game.DisplayName;
+                            vm.IsExperimental = !experimentalSettings.SupportedGames.Contains(game.GameId);
                             // is this supported game installed?
                             vm.IsFound = _installedGames.Any(install => install.Installation?.GetGame().GameId == game.GameId);
                             vm.GameInstallations = _installedGames
@@ -216,11 +235,15 @@ public class MyGamesViewModel : APageViewModel<IMyGamesViewModel>, IMyGamesViewM
                 var comingSoonMiniGameWidget = _serviceProvider.GetRequiredService<IComingSoonMiniGameWidgetViewModel>();
 
                 // create a new ReadOnlyObservableCollection from miniGameWidgetViewModels and comingSoonMiniGameWidget
-                _supportedGames = new ReadOnlyObservableCollection<IViewModelInterface>(
-                    new ObservableCollection<IViewModelInterface>(miniGameWidgetViewModels) {
-                    // Add the coming soon widget to the end of the list
-                    comingSoonMiniGameWidget,
-                });
+                new ObservableCollection<IViewModelInterface>(miniGameWidgetViewModels) { comingSoonMiniGameWidget }
+                    .ToObservableChangeSet()
+                    .Filter(settingsChanges.Select(settings => new Func<IViewModelInterface, bool>(vm =>
+                        vm is not IMiniGameWidgetViewModel mini || settings.EnableAllGames || !mini.IsExperimental)))
+                    .OnUI()
+                    .Bind(out _supportedGames)
+                    .SubscribeWithErrorLogging()
+                    .DisposeWith(d);
+                this.RaisePropertyChanged(nameof(SupportedGames));
             }
         );
     }

@@ -6,131 +6,154 @@ using DynamicData;
 using DynamicData.Binding;
 using DynamicData.Kernel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NexusMods.Abstractions.Loadouts;
 using NexusMods.Abstractions.Loadouts.Synchronizers;
 using NexusMods.App.UI.Controls.LoadoutCard;
+using NexusMods.App.UI.Dialog.Enums;
+using NexusMods.App.UI.Overlays.Generic.MessageBox.Ok;
 using NexusMods.App.UI.Pages.LoadoutPage;
-using NexusMods.App.UI.Resources;
 using NexusMods.App.UI.Windows;
 using NexusMods.App.UI.WorkspaceSystem;
 using NexusMods.MnemonicDB.Abstractions;
 using NexusMods.Sdk.Games;
 using NexusMods.Sdk.Loadouts;
 using NexusMods.UI.Sdk;
+using NexusMods.UI.Sdk.Dialog;
 using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
 
 namespace NexusMods.App.UI.Pages.MyLoadouts.GameLoadoutsSectionEntry;
 
 public class GameLoadoutsSectionEntryViewModel : AViewModel<IGameLoadoutsSectionEntryViewModel>, IGameLoadoutsSectionEntryViewModel
 {
-    private static readonly CardViewModelComparer CardComparerInstance = new();
-    private readonly CompositeDisposable _compositeDisposable;
-    private readonly GameInstallation _gameInstallation;
+    private readonly CompositeDisposable _lifetime = new();
     private readonly IWindowManager _windowManager;
-    private readonly ReadOnlyObservableCollection<IViewModelInterface> _loadoutCardViewModels;
-    private readonly ReadOnlyObservableCollection<IViewModelInterface> _cardViewModels;
-    private readonly SourceList<IViewModelInterface> _cardViewModelsSourceList = new();
+    private readonly ReadOnlyObservableCollection<IViewModelInterface> _cards;
+    private readonly SourceList<IViewModelInterface> _createCard = new();
+    private readonly ReadOnlyObservableCollection<LoadoutCardViewModel> _visibleProfiles;
     public string HeadingText { get; }
-    public ReadOnlyObservableCollection<IViewModelInterface> CardViewModels => _cardViewModels;
+    public string InstallationText { get; }
+    [Reactive] public bool IsVisible { get; private set; } = true;
+    [Reactive] public int TotalProfileCount { get; private set; }
+    [Reactive] public int MatchingProfileCount { get; private set; }
+    public ReadOnlyObservableCollection<IViewModelInterface> CardViewModels => _cards;
 
-
-    public GameLoadoutsSectionEntryViewModel(GameInstallation gameInstallation, IConnection conn, IServiceProvider serviceProvider, IWindowManager windowManager)
+    public GameLoadoutsSectionEntryViewModel(GameInstallation installation, IConnection connection, IServiceProvider services,
+        IWindowManager windowManager, IObservable<ProfileFilter>? filter = null)
     {
-        _compositeDisposable = new CompositeDisposable();
-        _gameInstallation = gameInstallation;
         _windowManager = windowManager;
+        var registry = services.GetRequiredService<IGameRegistry>();
+        var manager = services.GetRequiredService<ILoadoutManager>();
+        var synchronizer = services.GetRequiredService<ISynchronizerService>();
+        var logger = services.GetRequiredService<ILogger<GameLoadoutsSectionEntryViewModel>>();
+        HeadingText = installation.Game.DisplayName;
+        InstallationText = $"{installation.LocatorResult.Store} · {installation.Locations[LocationId.Game].Path}";
 
-        var gameRegistry = serviceProvider.GetRequiredService<IGameRegistry>();
-        var loadoutManager = serviceProvider.GetRequiredService<ILoadoutManager>();
-        HeadingText = string.Format(Language.MyLoadoutsGameSectionHeading, _gameInstallation.Game.DisplayName);
-
-        Loadout.ObserveAll(conn)
+        var profiles = Loadout.ObserveAll(connection)
             .Filter(loadout => loadout.IsVisible()
-                && gameRegistry.TryGetGameInstallation(loadout, out var installation)
-                && installation.Equals(_gameInstallation))
-            .Transform(loadout =>
-                {
-                    return (IViewModelInterface)new LoadoutCardViewModel(loadout, conn, serviceProvider)
-                    {
-                        VisitLoadoutCommand = ReactiveCommand.Create(() => NavigateToLoadout(loadout)),
-                    };
-                }
-            )
-            .Bind(out _loadoutCardViewModels)
-            .Subscribe()
-            .DisposeWith(_compositeDisposable);
+                && registry.TryGetGameInstallation(loadout, out var located) && located.Equals(installation))
+            .OnUI()
+            .TransformWithInlineUpdate(loadout => new LoadoutCardViewModel(loadout, connection, services)
+            {
+                VisitLoadoutCommand = ReactiveCommand.Create(() => NavigateToLoadout(loadout)),
+            }, (card, loadout) => card.UpdateLoadout(loadout))
+            .DisposeMany()
+            .AsObservableCache();
+        profiles.DisposeWith(_lifetime);
 
-        var createNewLoadoutCard = new CreateNewLoadoutCardViewModel()
+        var selection = (filter ?? Observable.Return(ProfileFilter.Default))
+            .CombineLatest(synchronizer.LastAppliedRevisionFor(installation).Select(revision => revision.Id).Prepend(default(LoadoutId)),
+                (options, appliedId) => (Options: options, AppliedId: appliedId))
+            .OnUI().Replay(1).RefCount();
+
+        profiles.Connect().QueryWhenChanged(query => query.Count)
+            .OnUI().Subscribe(count => TotalProfileCount = count).DisposeWith(_lifetime);
+
+        var matching = profiles.Connect()
+            .AutoRefresh(card => card.LoadoutName)
+            .Filter(selection.Select(state => new Func<LoadoutCardViewModel, bool>(card =>
+                (!state.Options.OnlyApplied || card.LoadoutVal.LoadoutId == state.AppliedId)
+                && (string.IsNullOrWhiteSpace(state.Options.SearchText)
+                    || card.LoadoutName.Contains(state.Options.SearchText.Trim(), StringComparison.OrdinalIgnoreCase)
+                    || HeadingText.Contains(state.Options.SearchText.Trim(), StringComparison.OrdinalIgnoreCase)))))
+            .AsObservableCache();
+        matching.DisposeWith(_lifetime);
+        matching.Connect().QueryWhenChanged(query => query.Count)
+            .CombineLatest(selection, (count, state) => (Count: count, Visible: count > 0 || !state.Options.IsFiltering))
+            .OnUI().Subscribe(state =>
+            {
+                MatchingProfileCount = state.Count;
+                IsVisible = state.Visible;
+            }).DisposeWith(_lifetime);
+
+        var comparers = selection.Select(state => (IComparer<LoadoutCardViewModel>)Comparer<LoadoutCardViewModel>.Create(
+            (left, right) => CompareProfiles(left, right, state.Options.SortOrder, state.AppliedId)));
+        matching.Connect().AutoRefresh(card => card.LoadoutName)
+            .Sort(comparers).OnUI().Bind(out _visibleProfiles).SubscribeWithErrorLogging().DisposeWith(_lifetime);
+
+        var create = new CreateNewLoadoutCardViewModel
         {
             AddLoadoutCommand = ReactiveCommand.CreateFromTask(async () =>
             {
-                await loadoutManager.CreateLoadout(_gameInstallation);
+                try
+                {
+                    var result = await windowManager.ShowDialog(ProfileDialogs.Create(installation.Game.DisplayName), DialogWindowType.Modal);
+                    if (result.ButtonId != ButtonDefinitionId.Accept) return;
+                    var created = await Task.Run(async () => await manager.CreateLoadout(installation, result.InputText));
+                    NavigateToLoadout(created);
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Could not create profile for {Game}", installation.Game.DisplayName);
+                    await MessageBoxOkViewModel.Show(services, "Could not create profile", ex.Message);
+                }
             }),
         };
+        create.AddLoadoutCommand.ThrownExceptions.Subscribe(ex => logger.LogError(ex, "Create profile command failed")).DisposeWith(_lifetime);
+        create.AddLoadoutCommand.DisposeWith(_lifetime);
+        _createCard.DisposeWith(_lifetime);
+        _createCard.Add(create);
 
-        _cardViewModelsSourceList.Add(createNewLoadoutCard);
-
-        _cardViewModelsSourceList.Connect()
-            .Merge(_loadoutCardViewModels.ToObservableChangeSet())
-            .Sort(CardComparerInstance)
-            .OnUI()
-            .Bind(out _cardViewModels)
-            .SubscribeWithErrorLogging()
-            .DisposeWith(_compositeDisposable);
-    }
-
-    private class CardViewModelComparer : IComparer<IViewModelInterface>
-    {
-        public int Compare(IViewModelInterface? x, IViewModelInterface? y)
-        {
-            if (x == null) return y == null ? 0 : -1;
-            if (y == null) return 1;
-
-            // Prioritize CreateNewLoadoutCardViewModel to always come first.
-            if (x is CreateNewLoadoutCardViewModel) return -1;
-            if (y is CreateNewLoadoutCardViewModel) return 1;
-
-            return (x, y) switch
+        // Concatenate the create tile and the sorted profile list without nesting action buttons.
+        _createCard.Connect().Merge(_visibleProfiles.ToObservableChangeSet().Transform(card => (IViewModelInterface)card))
+            .Sort(selection.Select(state => (IComparer<IViewModelInterface>)Comparer<IViewModelInterface>.Create((left, right) =>
             {
-                (LoadoutCardViewModel lx, LoadoutCardViewModel ly) => DateTimeOffset.Compare(lx.LoadoutVal.GetCreatedAt(), ly.LoadoutVal.GetCreatedAt()),
-                (SkeletonLoadoutCardViewModel sx, SkeletonLoadoutCardViewModel sy) => string.Compare(sx.LoadoutName, sy.LoadoutName, StringComparison.Ordinal),
-                (LoadoutCardViewModel lxs, SkeletonLoadoutCardViewModel sys) => -1,
-                (SkeletonLoadoutCardViewModel sxs, LoadoutCardViewModel lys) => 1,
-                _ => 0,
-            };
-        }
+                if (ReferenceEquals(left, right)) return 0;
+                if (left is ICreateNewLoadoutCardViewModel) return -1;
+                if (right is ICreateNewLoadoutCardViewModel) return 1;
+                return CompareProfiles((LoadoutCardViewModel)left, (LoadoutCardViewModel)right, state.Options.SortOrder, state.AppliedId);
+            })))
+            .OnUI().Bind(out _cards).SubscribeWithErrorLogging().DisposeWith(_lifetime);
     }
 
+    private static int CompareProfiles(LoadoutCardViewModel left, LoadoutCardViewModel right, ProfileSortOrder sort, LoadoutId appliedId)
+    {
+        if (ReferenceEquals(left, right)) return 0;
+        if (sort == ProfileSortOrder.AppliedFirst)
+        {
+            var applied = (right.LoadoutVal.LoadoutId == appliedId).CompareTo(left.LoadoutVal.LoadoutId == appliedId);
+            if (applied != 0) return applied;
+        }
+        var comparison = sort == ProfileSortOrder.Name
+            ? StringComparer.OrdinalIgnoreCase.Compare(left.LoadoutName, right.LoadoutName)
+            : right.LoadoutVal.GetCreatedAt().CompareTo(left.LoadoutVal.GetCreatedAt());
+        return comparison != 0 ? comparison : left.LoadoutVal.Id.CompareTo(right.LoadoutVal.Id);
+    }
 
     private void NavigateToLoadout(Loadout.ReadOnly loadout)
     {
         var loadoutId = loadout.LoadoutId;
-        Dispatcher.UIThread.Invoke(() =>
+        Dispatcher.UIThread.Invoke(() => _windowManager.ActiveWorkspaceController.ChangeOrCreateWorkspaceByContext(
+            context => context.LoadoutId == loadoutId,
+            () => new PageData
             {
-                var workspaceController = _windowManager.ActiveWorkspaceController;
-
-                workspaceController.ChangeOrCreateWorkspaceByContext(
-                    context => context.LoadoutId == loadoutId,
-                    () => new PageData
-                    {
-                        FactoryId = LoadoutPageFactory.StaticId,
-                        Context = new LoadoutPageContext
-                        {
-                            LoadoutId = loadoutId,
-                            GroupScope = Optional<CollectionGroupId>.None,
-                        },
-                    },
-                    () => new LoadoutContext
-                    {
-                        LoadoutId = loadoutId,
-                    }
-                );
-            }
-        );
+                FactoryId = LoadoutPageFactory.StaticId,
+                Context = new LoadoutPageContext { LoadoutId = loadoutId, GroupScope = Optional<CollectionGroupId>.None },
+            },
+            () => new LoadoutContext { LoadoutId = loadoutId }));
     }
 
-    public void Dispose()
-    {
-        _compositeDisposable.Dispose();
-    }
+    public void Dispose() => _lifetime.Dispose();
 }

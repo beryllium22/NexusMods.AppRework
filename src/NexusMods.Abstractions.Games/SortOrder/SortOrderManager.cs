@@ -60,6 +60,7 @@ public class SortOrderManager : ISortOrderManager, IDisposable, IAsyncDisposable
             // Reconcile the sort order for each variety
             var sortOrderId = await sortOrderVariety.GetOrCreateSortOrderFor(loadoutId, parentEntity, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
+            if (sortOrderId == default) continue;
             await sortOrderVariety.ReconcileSortOrder(sortOrderId, token: token).ConfigureAwait(false);
         }
     }

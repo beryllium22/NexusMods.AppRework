@@ -35,9 +35,9 @@ public record ExperimentalSettings : ISettings
                 new PropertyOptions<ExperimentalSettings, bool>
                 {
                     Section = Sections.Experimental,
-                    DisplayName = "Enable unsupported games",
-                    DescriptionFactory = _ => "Allows you to manage unsupported games.",
-                    RequiresRestart = true,
+                    DisplayName = "Show experimental games",
+                    DescriptionFactory = _ => "Shows game integrations that are still in development. Mod and collection compatibility may be incomplete. My Games updates immediately.",
+                    RequiresRestart = false,
                 },
                 new BooleanContainerOptions()
             )

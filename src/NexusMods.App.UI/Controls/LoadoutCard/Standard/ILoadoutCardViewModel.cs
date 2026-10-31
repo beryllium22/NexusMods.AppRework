@@ -23,6 +23,10 @@ public interface ILoadoutCardViewModel : IViewModelInterface
     string LoadoutModCount { get; }
     
     bool IsDeleting { get; }
+    bool IsBusy { get; }
+    string BusyText { get; }
+    string StatusText { get; }
+    bool HasPendingChanges { get; }
     
     bool IsSkeleton { get; }
     
@@ -31,6 +35,7 @@ public interface ILoadoutCardViewModel : IViewModelInterface
     ReactiveCommand<Unit, Unit> VisitLoadoutCommand { get; }
     
     ReactiveCommand<Unit, Unit> CloneLoadoutCommand { get; }
+    ReactiveCommand<Unit, Unit> RenameLoadoutCommand { get; }
     
     ReactiveCommand<Unit, Unit> DeleteLoadoutCommand { get; }
 }

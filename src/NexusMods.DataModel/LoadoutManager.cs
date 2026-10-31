@@ -26,6 +26,7 @@ using NexusMods.Sdk.Games;
 using NexusMods.Sdk.Jobs;
 using NexusMods.Sdk.Library;
 using NexusMods.Sdk.Loadouts;
+using OneOf;
 
 namespace NexusMods.DataModel;
 
@@ -39,6 +40,9 @@ internal partial class LoadoutManager : ILoadoutManager
     private readonly ISynchronizerService _synchronizerService;
     private readonly IGarbageCollectorRunner _garbageCollectorRunner;
     private readonly IGameRegistry _gameRegistry;
+    // Metadata creation and first ingestion must finish before another profile can
+    // decide whether this installation has an active profile or initial disk state.
+    private readonly SemaphoreSlim _installationCreationGate = new(1, 1);
 
     public LoadoutManager(IServiceProvider serviceProvider)
     {
@@ -53,6 +57,19 @@ internal partial class LoadoutManager : ILoadoutManager
     }
 
     public async ValueTask<GameInstallMetadata.ReadOnly> ManageInstallation(GameInstallation installation)
+    {
+        await _installationCreationGate.WaitAsync();
+        try
+        {
+            return await ManageInstallationCore(installation);
+        }
+        finally
+        {
+            _installationCreationGate.Release();
+        }
+    }
+
+    private async ValueTask<GameInstallMetadata.ReadOnly> ManageInstallationCore(GameInstallation installation)
     {
         if (!_gameRegistry.TryGetMetadata(installation, out var metadata))
         {
@@ -74,79 +91,90 @@ internal partial class LoadoutManager : ILoadoutManager
 
     public IJobTask<CreateLoadoutJob, Loadout.ReadOnly> CreateLoadout(GameInstallation installation, string? suggestedName = null)
     {
+        var name = suggestedName is null ? null : LoadoutName.Normalize(suggestedName);
         return _jobMonitor.Begin(new CreateLoadoutJob(installation), async ctx =>
         {
-            // Prime the hash database to make sure it's loaded
-            await _fileHashesService.GetFileHashesDb();
-
-            var metadata = await ManageInstallation(installation);
-            var shortName = GetNewShortName(_connection.Db, metadata);
-
-            using var tx = _connection.BeginTransaction();
-
-            List<LocatorId> locatorIds = [];
+            await _installationCreationGate.WaitAsync(ctx.CancellationToken);
+            try
             {
-                var metadataLocatorIds = installation.LocatorResult.LocatorIds;
-                var distinctLocatorIds = metadataLocatorIds.Distinct().ToArray();
+                // Prime the hash database to make sure it's loaded
+                await _fileHashesService.GetFileHashesDb();
 
-                if (distinctLocatorIds.Length != metadataLocatorIds.Length)
+                var metadata = await ManageInstallationCore(installation);
+                using var tx = _connection.BeginTransaction();
+
+                List<LocatorId> locatorIds = [];
                 {
-                    _logger.LogWarning("Duplicate locator ids `{LocatorIds}` found in LocatorResultMetadata for {Game} when creating new loadout", metadataLocatorIds, installation.Game.DisplayName);
+                    var metadataLocatorIds = installation.LocatorResult.LocatorIds;
+                    var distinctLocatorIds = metadataLocatorIds.Distinct().ToArray();
+
+                    if (distinctLocatorIds.Length != metadataLocatorIds.Length)
+                    {
+                        _logger.LogWarning("Duplicate locator ids `{LocatorIds}` found in LocatorResultMetadata for {Game} when creating new loadout", metadataLocatorIds, installation.Game.DisplayName);
+                    }
+
+                    locatorIds.AddRange(distinctLocatorIds);
                 }
 
-                locatorIds.AddRange(distinctLocatorIds);
-            }
+                if (!_fileHashesService.TryGetVanityVersion((installation.LocatorResult.Store, locatorIds.ToArray()), out var version))
+                    _logger.LogWarning("Unable to find game version for {Game}", installation.Game.DisplayName);
 
-            if (!_fileHashesService.TryGetVanityVersion((installation.LocatorResult.Store, locatorIds.ToArray()), out var version))
-                _logger.LogWarning("Unable to find game version for {Game}", installation.Game.DisplayName);
-
-            var loadout = new Loadout.New(tx)
-            {
-                Name = suggestedName ?? "Loadout " + shortName,
-                ShortName = shortName,
-                InstallationId = metadata,
-                Revision = 0,
-                LoadoutKind = LoadoutKind.Default,
-                LocatorIds = locatorIds,
-                GameVersion = version,
-            };
-
-            // Create the user's default collection
-            _ = new CollectionGroup.New(tx, out var userCollectionId)
-            {
-                IsReadOnly = false,
-                LoadoutItemGroup = new LoadoutItemGroup.New(tx, userCollectionId)
+                var loadoutId = tx.TempId();
+                tx.Add(loadoutId, Loadout.Installation, metadata.Id);
+                tx.Add(loadoutId, Loadout.Revision, 0UL);
+                tx.Add(loadoutId, Loadout.LoadoutKind, LoadoutKind.Default);
+                foreach (var locatorId in locatorIds) tx.Add(loadoutId, Loadout.LocatorIds, locatorId);
+                tx.Add(loadoutId, Loadout.GameVersion, version);
+                // Allocate the short name against the commit's current basis, so concurrent
+                // create/copy requests cannot both claim the same label.
+                tx.Add((loadoutId, metadata.Id, name), static (transaction, basis, args) =>
                 {
-                    IsGroup = true,
-                    LoadoutItem = new LoadoutItem.New(tx, userCollectionId)
+                    var shortName = GetNewShortName(basis, GameInstallMetadataId.From(args.Id));
+                    transaction.Add(args.loadoutId, Loadout.ShortName, shortName);
+                    transaction.Add(args.loadoutId, Loadout.Name, args.name ?? "Loadout " + shortName);
+                });
+
+                // Create the user's default collection
+                _ = new CollectionGroup.New(tx, out var userCollectionId)
+                {
+                    IsReadOnly = false,
+                    LoadoutItemGroup = new LoadoutItemGroup.New(tx, userCollectionId)
                     {
-                        Name = "My Mods",
-                        LoadoutId = loadout,
+                        IsGroup = true,
+                        LoadoutItem = new LoadoutItem.New(tx, userCollectionId)
+                        {
+                            Name = "My Mods",
+                            LoadoutId = LoadoutId.From(loadoutId),
+                        },
                     },
-                },
-            };
+                };
 
-            var result = await tx.Commit();
-            var remappedLoadout = result.Remap(loadout);
+                var result = await tx.Commit();
+                var remappedLoadout = Loadout.Load(result.Db, result[loadoutId]);
 
-            // If there is no currently synced loadout, then we can ingest the game folder
-            if (!GameInstallMetadata.LastSyncedLoadout.TryGetValue(remappedLoadout.Installation, out var lastSyncedLoadoutId))
-            {
-                await _synchronizerService.Synchronize(remappedLoadout.LoadoutId);
-                remappedLoadout = remappedLoadout.Rebase();
-            }
-            else
-            {
-                // check if the last synced loadout is valid (can apparently happen if the user unmanaged the game and manages it again)
-                var lastSyncedLoadout = Loadout.Load(remappedLoadout.Db, lastSyncedLoadoutId);
-                if (!lastSyncedLoadout.IsValid())
+                // If there is no currently synced loadout, then we can ingest the game folder
+                if (!GameInstallMetadata.LastSyncedLoadout.TryGetValue(remappedLoadout.Installation, out var lastSyncedLoadoutId))
                 {
                     await _synchronizerService.Synchronize(remappedLoadout.LoadoutId);
                     remappedLoadout = remappedLoadout.Rebase();
                 }
-            }
+                else
+                {
+                    // check if the last synced loadout is valid (can apparently happen if the user unmanaged the game and manages it again)
+                    var lastSyncedLoadout = Loadout.Load(remappedLoadout.Db, lastSyncedLoadoutId);
+                    if (!lastSyncedLoadout.IsValid())
+                    {
+                        await _synchronizerService.Synchronize(remappedLoadout.LoadoutId);
+                        remappedLoadout = remappedLoadout.Rebase();
+                    }
+                }
 
-            return remappedLoadout;
+                return remappedLoadout;
+            }
+            finally
+            {
+                _installationCreationGate.Release();
+            }
         });
     }
 
@@ -161,106 +189,204 @@ internal partial class LoadoutManager : ILoadoutManager
         return result;
     }
 
-    public async ValueTask<Loadout.ReadOnly> CopyLoadout(LoadoutId loadoutId, CancellationToken cancellationToken = default)
+    public async ValueTask<Loadout.ReadOnly> CopyLoadout(LoadoutId loadoutId, CancellationToken cancellationToken = default, string? suggestedName = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var name = suggestedName is null ? null : LoadoutName.Normalize(suggestedName);
         var baseDb = _connection.Db;
         var loadout = Loadout.Load(baseDb, loadoutId);
+        if (!loadout.IsValid() || !loadout.IsVisible())
+            throw new InvalidOperationException("This profile is no longer available to copy.");
 
-        // Temp space for datom values
-        Memory<byte> buffer = GC.AllocateUninitializedArray<byte>(length: 32);
-
-        // Cache some attribute ids
-        var cache = baseDb.AttributeCache;
-        var nameId = cache.GetAttributeId(Loadout.Name.Id);
-        var shortNameId = cache.GetAttributeId(Loadout.ShortName.Id);
-
-        // Create a mapping of old entity ids to new (temp) entity ids
-        Dictionary<EntityId, EntityId> entityIdList = new();
-        var remapFn = RemapFn;
-
-        using var tx = _connection.BeginTransaction();
-
-        // Add the loadout
-        var newLoadoutId = tx.TempId();
-        entityIdList[loadout.Id] = newLoadoutId;
-
-        // And each item
-        foreach (var item in LoadoutItem.FindByLoadout(loadout.Db, loadout))
+        var items = LoadoutItem.FindByLoadout(baseDb, loadout).ToArray();
+        var itemIds = items.Select(item => item.Id).ToHashSet();
+        var priorities = LoadoutItemGroupPriority.FindByLoadout(baseDb, loadout).ToArray();
+        var parentLinks = new Dictionary<EntityId, EntityId>();
+        foreach (var item in items)
         {
-            entityIdList[item.Id] = tx.TempId();
+            if (!LoadoutItem.Parent.TryGetValue(item, out var parentId)) continue;
+            if (!itemIds.Contains(parentId) || !LoadoutItemGroup.Load(baseDb, parentId).IsValid())
+                throw new InvalidOperationException("A mod refers to a missing group or a group outside this profile. Repair its group before copying.");
+            parentLinks.Add(item.Id, parentId);
         }
-
-        foreach (var (oldId, newId) in entityIdList)
+        var verifiedParents = new HashSet<EntityId>();
+        foreach (var start in parentLinks.Keys)
         {
-            // Get the original entity
-            var entity = baseDb.Get(oldId);
-
-            foreach (var datom in entity)
+            var chain = new HashSet<EntityId>();
+            var current = start;
+            while (!verifiedParents.Contains(current) && parentLinks.TryGetValue(current, out var parent))
             {
-                if (datom.A == nameId || datom.A == shortNameId) continue;
-
-                if (buffer.Length < datom.ValueSpan.Length)
-                    buffer = GC.AllocateUninitializedArray<byte>(datom.ValueSpan.Length);
-
-                datom.ValueSpan.CopyTo(buffer.Span);
-
-                var prefix = new KeyPrefix(newId, datom.A, TxId.Tmp, isRetract: false, datom.Prefix.ValueTag);
-                var newDatom = new Datom(prefix, buffer[..datom.ValueSpan.Length]);
-
-                datom.Prefix.ValueTag.Remap(buffer[..datom.ValueSpan.Length].Span, remapFn);
-
-                tx.Add(newDatom);
+                if (!chain.Add(current))
+                    throw new InvalidOperationException("The profile contains a cycle of parent groups. Repair those groups before copying.");
+                current = parent;
             }
+            verifiedParents.UnionWith(chain);
         }
-
-        // NOTE(erri120): using latest DB to prevent duplicate short names
-        var newShortName = GetNewShortName(_connection.Db, loadout.InstallationId);
-        var newName = "Loadout " + newShortName;
-
-        tx.Add(newLoadoutId, Loadout.Name, newName);
-        tx.Add(newLoadoutId, Loadout.ShortName, newShortName);
-
-        var result = await tx.Commit();
-        var newLoadout = Loadout.Load(result.Db, result[newLoadoutId]);
-        return newLoadout;
-
-        // Local function to remap entity ids in the format Attribute.Remap wants
-        EntityId RemapFn(EntityId entityId)
+        foreach (var priority in priorities)
         {
-            return entityIdList.GetValueOrDefault(entityId, entityId);
+            if (!itemIds.Contains(priority.TargetId.Value) || !priority.Target.IsValid())
+                throw new InvalidOperationException("A conflict priority refers to a missing mod or another profile. Repair the priority before copying.");
         }
+        var sourceIds = new HashSet<EntityId>(itemIds) { loadout.Id };
+        sourceIds.UnionWith(priorities.Select(priority => priority.Id));
+        var sortOrders = SortOrder.FindByLoadout(baseDb, loadout).ToArray();
+        foreach (var order in sortOrders)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var validParent = order.ParentEntity.Match(
+                id => id == loadout.LoadoutId,
+                id => CollectionGroup.Load(baseDb, id).IsValid() && itemIds.Contains(id.Value));
+            if (!validParent)
+                throw new InvalidOperationException("A load order refers to an invalid collection or another profile. Repair the load order before copying.");
+            sourceIds.Add(order.Id);
+            sourceIds.UnionWith(SortOrderItem.FindByParentSortOrder(baseDb, order).Select(item => item.Id));
+        }
+
+        // Packed SortOrder.ParentEntity IDs are scalars, not database references.
+        // Reserve permanent IDs first, without exposing any partially copied profiles,
+        // items, or orders to UI and sort-order reconciliation observers.
+        var entityIds = new Dictionary<EntityId, EntityId>();
+        using (var reserve = _connection.BeginTransaction())
+        {
+            foreach (var sourceId in sourceIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var reservedId = reserve.TempId();
+                reserve.Add(reservedId, ProfileCopyReservation.Reserved, Null.Instance);
+                entityIds.Add(sourceId, reservedId);
+            }
+            var reserved = await reserve.Commit();
+            entityIds = entityIds.ToDictionary(pair => pair.Key, pair => reserved[pair.Value]);
+        }
+
+        try
+        {
+            using var tx = _connection.BeginTransaction();
+            Memory<byte> buffer = GC.AllocateUninitializedArray<byte>(32);
+            var parentAttribute = baseDb.AttributeCache.GetAttributeId(SortOrder.ParentEntity.Id);
+            EntityId Remap(EntityId id) => entityIds.GetValueOrDefault(id, id);
+
+            foreach (var (oldId, newId) in entityIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                tx.Retract(newId, ProfileCopyReservation.Reserved, Null.Instance);
+                if (oldId == loadout.Id) continue;
+
+                foreach (var datom in baseDb.Get(oldId))
+                {
+                    if (datom.A == parentAttribute) continue;
+                    if (buffer.Length < datom.ValueSpan.Length)
+                        buffer = GC.AllocateUninitializedArray<byte>(datom.ValueSpan.Length);
+                    var value = buffer[..datom.ValueSpan.Length];
+                    datom.ValueSpan.CopyTo(value.Span);
+                    datom.Prefix.ValueTag.Remap(value.Span, Remap);
+                    tx.Add(new Datom(new KeyPrefix(newId, datom.A, TxId.Tmp, false, datom.Prefix.ValueTag), value));
+                }
+            }
+
+            foreach (var order in sortOrders)
+            {
+                var parent = order.ParentEntity.Match(
+                    id => OneOf<LoadoutId, CollectionGroupId>.FromT0(LoadoutId.From(Remap(id.Value))),
+                    id => OneOf<LoadoutId, CollectionGroupId>.FromT1(CollectionGroupId.From(Remap(id.Value))));
+                tx.Add(Remap(order.Id), SortOrder.ParentEntity, parent);
+            }
+
+            // Copy profile configuration explicitly. Application timestamps and game
+            // deployment receipts describe the source's disk state, never the new profile.
+            var newLoadoutId = Remap(loadout.Id);
+            tx.Add(newLoadoutId, Loadout.Installation, loadout.InstallationId.Value);
+            tx.Add(newLoadoutId, Loadout.GameVersion, loadout.GameVersion);
+            foreach (var locatorId in loadout.LocatorIds) tx.Add(newLoadoutId, Loadout.LocatorIds, locatorId);
+            tx.Add(newLoadoutId, Loadout.Revision, 0UL);
+            tx.Add(newLoadoutId, Loadout.LoadoutKind, LoadoutKind.Default);
+            tx.Add(newLoadoutId, (loadoutId, name, cancellationToken), static (transaction, basis, targetId, args) =>
+            {
+                args.cancellationToken.ThrowIfCancellationRequested();
+                var source = Loadout.Load(basis, args.loadoutId);
+                if (!source.IsValid() || !source.IsVisible())
+                    throw new InvalidOperationException("The original profile was removed before its copy could be completed.");
+                var shortName = GetNewShortName(basis, source.InstallationId);
+                transaction.Add(targetId, Loadout.ShortName, shortName);
+                transaction.Add(targetId, Loadout.Name, args.name ?? "Loadout " + shortName);
+            });
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await tx.Commit();
+            return Loadout.Load(result.Db, newLoadoutId);
+        }
+        catch
+        {
+            // Do not use the caller's cancelled token to abandon cleanup. A crash between
+            // reservation and publication is recovered on the next application startup.
+            using var cleanup = _connection.BeginTransaction();
+            foreach (var id in entityIds.Values)
+            {
+                if (ProfileCopyReservation.Load(_connection.Db, id).IsValid())
+                    cleanup.Delete(id, recursive: false);
+            }
+            await cleanup.Commit();
+            throw;
+        }
+    }
+
+    public async ValueTask RenameLoadout(LoadoutId loadoutId, string name, CancellationToken cancellationToken = default)
+    {
+        var normalizedName = LoadoutName.Normalize(name);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var tx = _connection.BeginTransaction();
+        tx.Add((loadoutId, normalizedName, cancellationToken), static (transaction, basis, args) =>
+        {
+            args.cancellationToken.ThrowIfCancellationRequested();
+            var loadout = Loadout.Load(basis, args.loadoutId);
+            if (!loadout.IsValid() || !loadout.IsVisible())
+                throw new InvalidOperationException("This profile is no longer available to rename.");
+            transaction.Add(args.loadoutId, Loadout.Name, args.normalizedName);
+        });
+        await tx.Commit();
     }
 
     public async ValueTask DeleteLoadout(LoadoutId loadoutId, GarbageCollectorRunMode gcRunMode = GarbageCollectorRunMode.DoNotRun, bool deactivateIfActive = true, CancellationToken cancellationToken = default)
     {
-        {
-            using var tx1 = _connection.BeginTransaction();
-            tx1.Add(loadoutId, Loadout.LoadoutKind, LoadoutKind.Deleted);
-            await tx1.Commit();
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         var loadout = Loadout.Load(_connection.Db, loadoutId);
-        Debug.Assert(!loadout.IsVisible(), "loadout shouldn't be visible anymore");
+        if (!loadout.IsValid()) return;
 
         var metadata = GameInstallMetadata.Load(_connection.Db, loadout.InstallationId);
         if (deactivateIfActive && GameInstallMetadata.LastSyncedLoadout.TryGetValue(metadata, out var lastAppliedLoadout) && lastAppliedLoadout == loadoutId.Value)
         {
+            // Keep the profile available if deactivation fails or is cancelled. No
+            // deletion marker is needed when the final graph removal is atomic.
             await DeactivateCurrentLoadout(loadout.InstallationInstance, cancellationToken: cancellationToken);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         using var tx = _connection.BeginTransaction();
-
-        tx.Delete(loadoutId, recursive: false);
-        foreach (var item in LoadoutItem.FindByLoadout(loadout.Db, loadout))
+        tx.Add((loadoutId, deactivateIfActive, cancellationToken), static (transaction, basis, args) =>
         {
-            tx.Delete(item.Id, recursive: false);
-        }
+            args.cancellationToken.ThrowIfCancellationRequested();
+            var current = Loadout.Load(basis, args.loadoutId);
+            if (!current.IsValid()) return;
 
-        foreach (var priorityEntity in LoadoutItemGroupPriority.FindByLoadout(loadout.Db, loadout))
-        {
-            tx.Delete(priorityEntity, recursive: false);
-        }
+            if (args.deactivateIfActive
+                && GameInstallMetadata.LastSyncedLoadout.TryGetValue(current.Installation, out var applied)
+                && applied == current.Id)
+                throw new InvalidOperationException("This profile was applied while it was being deleted. Apply another profile before retrying.");
 
+            // Deactivation can ingest external files, and queued operations may have
+            // added orders or items. Remove the complete graph from the commit basis.
+            transaction.Delete(current.Id, recursive: false);
+            foreach (var item in LoadoutItem.FindByLoadout(basis, current))
+                transaction.Delete(item.Id, recursive: false);
+            foreach (var priority in LoadoutItemGroupPriority.FindByLoadout(basis, current))
+                transaction.Delete(priority.Id, recursive: false);
+            foreach (var order in SortOrder.FindByLoadout(basis, current))
+            {
+                foreach (var item in SortOrderItem.FindByParentSortOrder(basis, order))
+                    transaction.Delete(item.Id, recursive: false);
+                transaction.Delete(order.Id, recursive: false);
+            }
+        });
         await tx.Commit();
         
         // Execute the garbage collector

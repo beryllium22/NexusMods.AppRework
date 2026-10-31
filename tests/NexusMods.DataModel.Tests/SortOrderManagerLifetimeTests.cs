@@ -7,6 +7,7 @@ using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using NexusMods.Abstractions.Games;
 using NexusMods.Abstractions.Loadouts;
+using NexusMods.Games.RedEngine.Witcher3;
 using NexusMods.Games.TestFramework;
 using NexusMods.MnemonicDB.Abstractions;
 using NexusMods.Sdk;
@@ -88,6 +89,42 @@ public class SortOrderManagerLifetimeTests(ITestOutputHelper helper) : ACyberpun
     }
 
     [Fact]
+    public async Task OpeningAnotherGamePreservesExistingGameSubscriptionsAndVarieties()
+    {
+        var pendingQuery = new PendingQuery(Connection);
+        var variety = CreateVariety(pendingQuery);
+        var provider = CreateProvider(variety);
+        var cyberpunkManager = provider.GetRequiredService<SortOrderManager>();
+        cyberpunkManager.RegisterSortOrderVarieties([variety], Game);
+        var witcherManager = provider.GetRequiredService<SortOrderManager>();
+        var witcherGame = ServiceProvider.GetRequiredService<Witcher3Game>();
+        witcherManager.RegisterSortOrderVarieties([], witcherGame);
+
+        try
+        {
+            witcherManager.Should().NotBeSameAs(cyberpunkManager);
+            witcherManager.GetSortOrderVarieties().Should().BeEmpty();
+            cyberpunkManager.GetSortOrderVarieties().Should().ContainSingle().Which.Should().BeSameAs(variety);
+
+            // Adding a Cyberpunk profile must still reach its original reactive subscription
+            // after another game has initialized a manager with no sort-order varieties.
+            var creation = CreateLoadout();
+            await pendingQuery.Entered.Task.WaitAsync(Timeout);
+            pendingQuery.Release.TrySetResult();
+            await creation.WaitAsync(Timeout);
+        }
+        finally
+        {
+            pendingQuery.Release.TrySetResult();
+            await provider.DisposeAsync().AsTask().WaitAsync(Timeout);
+        }
+
+        pendingQuery.DatabaseReads.Should().NotBeEmpty();
+        pendingQuery.DatabaseReads.Should().OnlyContain(count => count >= 0);
+        pendingQuery.DependencyDisposed.Task.IsCompleted.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task CallerCancellationStopsBeforeStartingAnotherDatabaseOperation()
     {
         var pendingQuery = new PendingQuery(Connection);
@@ -126,7 +163,7 @@ public class SortOrderManagerLifetimeTests(ITestOutputHelper helper) : ACyberpun
             // This database belongs to the outer test fixture; it is not disposed by this provider.
             .AddSingleton(Connection)
             .AddSingleton<ISortOrderVariety>(_ => variety)
-            .AddSingleton<SortOrderManager>()
+            .AddGames()
             .BuildServiceProvider();
 
         // Model a dependency resolved before the manager, as its native connection is in the app.

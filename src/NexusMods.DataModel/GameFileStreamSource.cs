@@ -45,6 +45,9 @@ public class GameFileStreamSource : IReadOnlyStreamSource
         {
             var metadata = GameInstallMetadata.Load(_conn.Db, option.Game);
             if (!metadata.IsValid()) continue;
+            // A first scan or unmanaged installation can contain matching disk hashes
+            // without an applied loadout. It is not a usable installation lookup yet.
+            if (!metadata.Contains(GameInstallMetadata.LastSyncedLoadout)) continue;
             if (!_gameRegistry.TryGetGameInstallation(metadata.LastSyncedLoadout, out var installation)) continue;
 
             var resolvedPath = installation.Locations.ToAbsolutePath(new GamePath(option.Location, option.Path));

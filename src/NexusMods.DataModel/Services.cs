@@ -112,6 +112,8 @@ public static class Services
         coll.AddSingleton<UndoService>();
 
         coll.AddSingleton<ILoadoutManager, LoadoutManager>();
+        coll.AddProfileCopyReservationModel();
+        coll.AddHostedService<ProfileCopyRecoveryService>();
 
         // Verbs
         coll.AddLoadoutManagementVerbs()

@@ -39,13 +39,14 @@ public class CollectionTargetPathTests(ITestOutputHelper helper)
         => base.AddServices(services).AddSingleton<IProcessRunner, NoExternalProcesses>();
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task InstalledAndCopiedCollectionFilesRemainInTheirContainingLoadout(bool bundled)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task InstalledAndCopiedCollectionFilesRemainInTheirContainingLoadout(bool bundled, bool rawFile)
     {
         var loadout = await CreateLoadout();
         var collection = await CreateCollection(loadout, "Offline collection");
-        var (download, sourceCollection, mod, fileStore) = await CreateSource(bundled);
+        var (download, sourceCollection, mod, fileStore) = await CreateSource(bundled, rawFile);
 
         // A standalone mod legitimately has no ParentId. It must not prevent copying a
         // collection merely because both groups participate in conflict priorities.
@@ -155,10 +156,12 @@ public class CollectionTargetPathTests(ITestOutputHelper helper)
     private EntityId[] FindRedModGroups(LoadoutId loadoutId)
         => Connection.Query<EntityId>($"SELECT ModGroupId FROM redmod.LoadoutRedModGroups({Connection.Db}, {loadoutId.Value}, {LocationId.Game.Value})").ToArray();
 
-    private async Task<(CollectionDownload.ReadOnly, NexusModsCollectionLibraryFile.ReadOnly, Mod, IFileStore)> CreateSource(bool bundled)
+    private async Task<(CollectionDownload.ReadOnly, NexusModsCollectionLibraryFile.ReadOnly, Mod, IFileStore)> CreateSource(bool bundled, bool rawFile = false)
     {
         var sourceArchive = await CreateLibraryArchive(Connection, "offline-collection.zip");
-        var payloadArchive = bundled ? sourceArchive : await CreateLibraryArchive(Connection, "offline-mod.zip");
+        var payloadFile = bundled ? sourceArchive.AsLibraryFile()
+            : rawFile ? await CreateRawFile()
+            : (await CreateLibraryArchive(Connection, "offline-mod.zip")).AsLibraryFile();
         using var payloadStream = new MemoryStream(Payload, writable: false);
         var payloadMd5 = await Md5Hasher.HashAsync(payloadStream);
         var archiveMd5 = Md5Value.FromHex("1234567890abcdef1234567890abcdef");
@@ -204,18 +207,19 @@ public class CollectionTargetPathTests(ITestOutputHelper helper)
             {
                 CollectionDownload = download,
                 Md5 = archiveMd5,
-                Size = payloadArchive.AsLibraryFile().Size,
+                Size = payloadFile.Size,
                 Uri = new Uri("https://example.invalid/offline-mod.zip"),
             };
         }
 
         tx.Add(sourceArchive.Id, NexusModsCollectionLibraryFile.CollectionSlug, slug);
         tx.Add(sourceArchive.Id, NexusModsCollectionLibraryFile.CollectionRevisionNumber, revisionNumber);
-        tx.Add(payloadArchive.Id, LibraryFile.Md5, archiveMd5);
+        tx.Add(payloadFile.Id, LibraryFile.Md5, archiveMd5);
         var archivePath = bundled ? RelativePath.FromUnsanitizedInput("bundled/offline").Join(TargetPath.Path) : RelativePath.FromUnsanitizedInput("source/info.json");
+        if (!rawFile)
         _ = new LibraryArchiveFileEntry.New(tx, out var fileId)
         {
-            ParentId = payloadArchive,
+            ParentId = payloadFile.Id,
             Path = archivePath,
             LibraryFile = new LibraryFile.New(tx, fileId)
             {
@@ -245,6 +249,75 @@ public class CollectionTargetPathTests(ITestOutputHelper helper)
         };
 
         return (result.Remap(download), NexusModsCollectionLibraryFile.Load(result.Db, sourceArchive.Id), mod, fileStore);
+    }
+
+    private async Task<LibraryFile.ReadOnly> CreateRawFile()
+    {
+        using var tx = Connection.BeginTransaction();
+        var file = new LibraryFile.New(tx, out var id)
+        {
+            Hash = Payload.AsSpan().xxHash3(), Size = Size.FromLong(Payload.Length), FileName = "info.json",
+            LibraryItem = new LibraryItem.New(tx, id) { Name = "Standalone collection file" },
+        };
+        return (await tx.Commit()).Remap(file);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReplicatedFilesRejectMissingHashesAndConflictingDestinationsWithoutCommitting(bool conflict)
+    {
+        var loadout = await CreateLoadout();
+        var collection = await CreateCollection(loadout, "Offline collection");
+        var (download, source, original, store) = await CreateSource(bundled: false, rawFile: true);
+        var invalid = new PathAndHash { Path = TargetPath.Path, MD5 = Md5Value.FromHex("ffffffffffffffffffffffffffffffff") };
+        var mod = new Mod
+        {
+            Name = original.Name, DomainName = original.DomainName, Source = original.Source,
+            Hashes = conflict ? [original.Hashes[0], invalid] : [invalid],
+        };
+        var job = new InstallCollectionDownloadJob
+        {
+            Logger = Logger, Item = download, Group = collection, TargetLoadout = loadout,
+            CollectionMod = mod, SourceCollection = source, ServiceProvider = ServiceProvider,
+            Connection = Connection, FileStore = store, LibraryService = LibraryService, LoadoutManager = LoadoutManager,
+        };
+        var context = Substitute.For<IJobContext<InstallCollectionDownloadJob>>();
+        context.CancellationToken.Returns(CancellationToken.None);
+        var action = async () => await job.StartAsync(context);
+        await action.Should().ThrowAsync<InvalidDataException>();
+        CollectionGroup.Load(Connection.Db, collection.Id).AsLoadoutItemGroup().Children.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CancellingReplicationStopsHashingAndDoesNotCommitAnIncompleteMod()
+    {
+        var loadout = await CreateLoadout();
+        var collection = await CreateCollection(loadout, "Offline collection");
+        var (download, source, mod, store) = await CreateSource(bundled: false, rawFile: true);
+        using var cancellation = new CancellationTokenSource();
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.GetFileStream(Payload.AsSpan().xxHash3(), Arg.Any<CancellationToken>())
+            .Returns(async call =>
+            {
+                reading.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, call.Arg<CancellationToken>());
+                return Stream.Null;
+            });
+        var job = new InstallCollectionDownloadJob
+        {
+            Logger = Logger, Item = download, Group = collection, TargetLoadout = loadout,
+            CollectionMod = mod, SourceCollection = source, ServiceProvider = ServiceProvider,
+            Connection = Connection, FileStore = store, LibraryService = LibraryService, LoadoutManager = LoadoutManager,
+        };
+        var context = Substitute.For<IJobContext<InstallCollectionDownloadJob>>();
+        context.CancellationToken.Returns(cancellation.Token);
+        var install = job.StartAsync(context).AsTask();
+        await reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        cancellation.Cancel();
+        var action = () => install.WaitAsync(TimeSpan.FromSeconds(10));
+        await action.Should().ThrowAsync<OperationCanceledException>();
+        CollectionGroup.Load(Connection.Db, collection.Id).AsLoadoutItemGroup().Children.Should().BeEmpty();
     }
 
     private sealed class NoExternalProcesses : IProcessRunner

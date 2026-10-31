@@ -63,17 +63,24 @@ public partial class DialogStandardContentView : ReactiveUserControl<IDialogStan
                 this.Bind(ViewModel,
                     vm => vm.InputText,
                     view => view.InputTextBox.Text
-                );
+                ).DisposeWith(disposables);
+
+                this.OneWayBind(ViewModel, vm => vm.InputValidationError, view => view.InputValidationErrorText.Text)
+                    .DisposeWith(disposables);
+                this.WhenAnyValue(view => view.ViewModel!.IsInputValid)
+                    .Select(valid => !valid)
+                    .BindToView(this, view => view.InputValidationErrorText.IsVisible)
+                    .DisposeWith(disposables);
 
                 this.OneWayBind(ViewModel,
                     vm => vm.InputLabel,
                     view => view.InputLabel.Text
-                );
+                ).DisposeWith(disposables);
 
                 this.OneWayBind(ViewModel,
                     vm => vm.InputWatermark,
                     view => view.InputTextBox.Watermark
-                );
+                ).DisposeWith(disposables);
 
                 this.BindCommand(ViewModel,
                         vm => vm.ClearInputCommand,

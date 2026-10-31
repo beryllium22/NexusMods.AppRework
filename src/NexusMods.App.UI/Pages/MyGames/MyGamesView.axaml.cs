@@ -13,6 +13,9 @@ public partial class MyGamesView : ReactiveUserControl<IMyGamesViewModel>
 
         this.WhenActivated(d =>
             {
+                this.Bind(ViewModel, vm => vm.ShowExperimentalGames, view => view.ShowExperimentalGamesCheckBox.IsChecked)
+                    .DisposeWith(d);
+
                 this.WhenAnyValue(view => view.ViewModel!.InstalledGames)
                     .BindToView(this, view => view.DetectedGamesItemsControl.ItemsSource)
                     .DisposeWith(d);

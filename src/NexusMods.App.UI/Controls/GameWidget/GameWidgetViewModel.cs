@@ -17,6 +17,7 @@ namespace NexusMods.App.UI.Controls.GameWidget;
 public class GameWidgetViewModel : AViewModel<IGameWidgetViewModel>, IGameWidgetViewModel
 {
     private readonly ILogger<GameWidgetViewModel> _logger;
+    [Reactive] public bool IsExperimental { get; set; }
 
     public GameWidgetViewModel(ILogger<GameWidgetViewModel> logger, ISettingsManager settingsManager, IFileHashesService fileHashesService)
     {

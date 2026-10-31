@@ -105,11 +105,30 @@ public class Fallout4 : ICreationEngineGame, IGameData<Fallout4>
         var fileName = name?.FileName.ToString() ?? "unknown.esm";
         var key = ModKey.FromFileName(fileName);
         await using var stream = await _streamSource.OpenAsync(hash);
-        var meta = ParsingMeta.Factory(BinaryReadParameters.Default, GameRelease.Fallout4, key, stream!);
-        await using var mutagenStream = new MutagenBinaryReadStream(stream!, meta);
+        if (stream is null)
+            throw new FileNotFoundException($"The archived contents of {fileName} could not be found.");
+        return ParsePluginHeader(stream, key);
+    }
+
+    public ValueTask<IMod?> ParsePlugin(AbsolutePath path)
+    {
+        using var stream = path.Read();
+        return ValueTask.FromResult<IMod?>(ParsePluginHeader(stream, ModKey.FromFileName(path.Name.ToString())));
+    }
+
+    private static IMod ParsePluginHeader(Stream stream, ModKey key)
+    {
+        var meta = ParsingMeta.Factory(BinaryReadParameters.Default, GameRelease.Fallout4, key, stream);
+        using var mutagenStream = new MutagenBinaryReadStream(stream, meta);
         using var frame = new MutagenFrame(mutagenStream);
         return Fallout4Mod.CreateFromBinary(frame, Fallout4Release.Fallout4, EmptyGroupMask);
     }
 
     public GamePath PluginsFile => Fallout4KnownPaths.PluginsFile;
+
+    public IReadOnlyList<ModKey> OfficialPlugins { get; } = new[]
+    {
+        "Fallout4.esm", "DLCRobot.esm", "DLCworkshop01.esm", "DLCCoast.esm",
+        "DLCworkshop02.esm", "DLCworkshop03.esm", "DLCNukaWorld.esm", "DLCUltraHighResolution.esm",
+    }.Select(file => ModKey.FromFileName(file)).ToArray();
 }

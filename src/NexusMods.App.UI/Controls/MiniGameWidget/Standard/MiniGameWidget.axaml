@@ -46,6 +46,10 @@
                            Foreground="{StaticResource NeutralModerateBrush}"
                            TextTrimming="CharacterEllipsis"/>
 
+                <TextBlock x:Name="ExperimentalBadge" Text="Experimental"
+                           Foreground="{StaticResource NeutralModerateBrush}"
+                           ToolTip.Tip="This game integration is still in development. Some mods and game versions may not work." />
+
                 <!-- Game stores supported -->
 
                 <!-- STEAM -->

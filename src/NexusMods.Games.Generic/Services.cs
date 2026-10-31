@@ -1,4 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using NexusMods.Games.FOMOD;
 using NexusMods.Games.Generic.Dependencies;
 using NexusMods.Games.Generic.FileAnalyzers;
 using NexusMods.Paths;
@@ -10,6 +12,7 @@ public static class Services
 {
     public static IServiceCollection AddGenericGameSupport(this IServiceCollection services)
     {
+        services.TryAddSingleton<IFomodDependencyResolver, FomodDependencyResolver>();
         services.AddSingleton<IniAnalysisData>();
         services.AddSingleton<GameToolRunner>();
 

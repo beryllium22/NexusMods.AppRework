@@ -6,6 +6,7 @@ using NexusMods.Abstractions.Loadouts;
 using NexusMods.Games.RedEngine.Cyberpunk2077.Extensions;
 using NexusMods.Games.RedEngine.Cyberpunk2077.Models;
 using NexusMods.MnemonicDB.Abstractions;
+using NexusMods.MnemonicDB.Abstractions.ElementComparers;
 using NexusMods.MnemonicDB.Abstractions.TxFunctions;
 using NexusMods.Paths;
 using NexusMods.Sdk.Loadouts;
@@ -46,30 +47,34 @@ public class RedModSortOrderVariety : ASortOrderVariety<
         OneOf<LoadoutId, CollectionGroupId> parentEntity,
         CancellationToken token = default)
     {
-        var optionalSortOrderId = GetSortOrderIdFor(parentEntity);
-        if (optionalSortOrderId.HasValue)
-            return optionalSortOrderId.Value;
-        
         token.ThrowIfCancellationRequested();
-        
         using var ts = Connection.BeginTransaction();
-        var newSortOrder = new Abstractions.Loadouts.SortOrder.New(ts)
-        {
-            LoadoutId = loadoutId,
-            ParentEntity = parentEntity,
-            SortOrderTypeId = SortOrderVarietyId.Value,
-        };
+        var newId = ts.TempId();
+        EntityId selectedId = default;
 
-        var newRedModSortOrder = new RedModSortOrder.New(ts, newSortOrder)
+        // Observe ownership and uniqueness in the same commit. Queued reactive work
+        // may outlive a deleted profile or collection, and multiple callbacks can race.
+        ts.Add((loadoutId, parentEntity, newId, token), (transaction, basis, args) =>
         {
-            SortOrder = newSortOrder,
-            IsMarker = true,
-        };
+            args.token.ThrowIfCancellationRequested();
+            if (!HasLiveParent(basis, args.loadoutId, args.parentEntity)) return;
+
+            foreach (var existing in Abstractions.Loadouts.SortOrder.FindByParentEntity(basis, args.parentEntity))
+            {
+                if (existing.SortOrderTypeId != SortOrderVarietyId.Value || existing.LoadoutId != args.loadoutId) continue;
+                selectedId = existing.Id;
+                return;
+            }
+
+            transaction.Add(args.newId, Abstractions.Loadouts.SortOrder.Loadout, args.loadoutId.Value);
+            transaction.Add(args.newId, Abstractions.Loadouts.SortOrder.ParentEntity, args.parentEntity);
+            transaction.Add(args.newId, Abstractions.Loadouts.SortOrder.SortOrderTypeId, SortOrderVarietyId.Value);
+            transaction.Add(args.newId, RedModSortOrder.Marker, Null.Instance);
+            selectedId = args.newId;
+        });
 
         var commitResult = await ts.Commit();
-
-        var redModSortOrder = commitResult.Remap(newRedModSortOrder);
-        return redModSortOrder.AsSortOrder().SortOrderId;
+        return selectedId == default(EntityId) ? default : SortOrderId.From(selectedId == newId ? commitResult[newId] : selectedId);
     }
 
     public override IObservable<IChangeSet<RedModReactiveSortItem, SortItemKey<string>>> GetSortOrderItemsChangeSet(SortOrderId sortOrderId)

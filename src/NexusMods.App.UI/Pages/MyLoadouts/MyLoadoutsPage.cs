@@ -32,7 +32,7 @@ public class MyLoadoutsPageFactory : APageFactory<IMyLoadoutsViewModel, MyLoadou
         yield return new PageDiscoveryDetails
         {
             // TODO: Update with design mandate names
-            SectionName = "Loadouts",
+            SectionName = "Profiles",
             ItemName = Language.MyLoadoutsPageTitle,
             Icon = IconValues.Package,
             PageData = new PageData

@@ -203,7 +203,9 @@ public abstract class ASortOrderVariety<TKey, TReactiveSortItem, TItemLoadoutDat
             var refDb = referenceDb ?? Connection.Db;
 
             // Check if the sort order still exists
-            if (!SortOrder.Load(refDb.Connection.Db, sortOrderId).IsValid())
+            var liveDb = Connection.Db;
+            var liveOrder = SortOrder.Load(liveDb, sortOrderId);
+            if (!liveOrder.IsValid() || !HasLiveParent(liveDb, liveOrder.LoadoutId, liveOrder.ParentEntity))
             {
                 // Sort order no longer exists, collection/loadout was deleted, abort.
                 return;
@@ -277,9 +279,11 @@ public abstract class ASortOrderVariety<TKey, TReactiveSortItem, TItemLoadoutDat
         tx.Add(sortOrderId, sortOrderTxId,
             (_ ,txDb, orderId, oldTxId) =>
             {
+                var currentOrder = SortOrder.Load(txDb, orderId);
                 var currentTxId = GetMaxTxIdForSortOrder(orderId, txDb);
                 
-                if (currentTxId > oldTxId || currentTxId == default(TxId))
+                if (currentTxId > oldTxId || currentTxId == default(TxId)
+                    || !currentOrder.IsValid() || !HasLiveParent(txDb, currentOrder.LoadoutId, currentOrder.ParentEntity))
                 {
                     throw new InvalidOperationException(
                         $"Unable to complete transaction: Sort Order {orderId} changed, Current TxId: {currentTxId}, Old TxId: {oldTxId}");
@@ -318,7 +322,10 @@ public abstract class ASortOrderVariety<TKey, TReactiveSortItem, TItemLoadoutDat
     protected virtual IReadOnlyList<(TItemSortData SortedEntry, TItemLoadoutData ItemLoadoutData)> ReconcileSortOrderCore(SortOrderId sortOrderId, IDb loadoutRevisionDb)
     {
         // Get the most recent sort order data
-        var sortOrder = SortOrder.Load(loadoutRevisionDb.Connection.Db, sortOrderId);
+        var currentDb = Connection.Db;
+        var sortOrder = SortOrder.Load(currentDb, sortOrderId);
+        if (!sortOrder.IsValid() || !HasLiveParent(currentDb, sortOrder.LoadoutId, sortOrder.ParentEntity))
+            return [];
         
         var collectionGroupId = sortOrder.ParentEntity.IsT1 ? 
             sortOrder.ParentEntity.AsT1 : 
@@ -328,7 +335,7 @@ public abstract class ASortOrderVariety<TKey, TReactiveSortItem, TItemLoadoutDat
         var loadoutData = RetrieveLoadoutData(sortOrder.LoadoutId, collectionGroupId, loadoutRevisionDb);
         
         // Get the most recent sort order data
-        var currentSortOrder = RetrieveSortOrder(sortOrderId, loadoutRevisionDb.Connection.Db);
+        var currentSortOrder = RetrieveSortOrder(sortOrderId, currentDb);
         
         var reconciledItems = Reconcile(currentSortOrder, loadoutData);
         return reconciledItems;
@@ -367,6 +374,22 @@ public abstract class ASortOrderVariety<TKey, TReactiveSortItem, TItemLoadoutDat
                 maxTxId = maxId;
         }
         return maxTxId;
+    }
+
+    /// <summary>Checks ownership against one snapshot before creating or updating an order.</summary>
+    protected static bool HasLiveParent(IDb db, LoadoutId loadoutId, OneOf<LoadoutId, CollectionGroupId> parentEntity)
+    {
+        var loadout = Loadout.Load(db, loadoutId);
+        if (!loadout.IsValid() || !loadout.IsVisible()) return false;
+
+        return parentEntity.Match(
+            parentLoadoutId => parentLoadoutId == loadoutId,
+            collectionId =>
+            {
+                var collection = CollectionGroup.Load(db, collectionId);
+                return collection.IsValid()
+                    && collection.AsLoadoutItemGroup().AsLoadoutItem().LoadoutId == loadoutId;
+            });
     }
 
 #endregion protected members

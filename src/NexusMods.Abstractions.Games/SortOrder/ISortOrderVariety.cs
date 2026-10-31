@@ -54,6 +54,7 @@ public interface ISortOrderVariety
     /// Returns the SortOrderId for the given loadout, parent entity and variety.
     /// If it does not exist, it will first be created.
     /// </summary>
+    /// <returns>The order ID, or the default ID when its owning profile or collection no longer exists.</returns>
     [Pure]
     public ValueTask<SortOrderId> GetOrCreateSortOrderFor(
         LoadoutId loadoutId,

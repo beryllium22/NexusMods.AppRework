@@ -27,6 +27,11 @@ try {
     }
 
     Copy-Item LICENSE.md $outputPath
+    (Get-Content docs/FEATURES_AND_COMPATIBILITY.md -Raw).Replace('(REWORK_ROADMAP.md)', '(PORTS-AND-ROADMAP.md)') |
+        Set-Content (Join-Path $outputPath 'FEATURES_AND_COMPATIBILITY.md') -Encoding utf8
+    $previewImagesPath = Join-Path $outputPath 'images'
+    New-Item -ItemType Directory -Path $previewImagesPath -Force | Out-Null
+    Copy-Item -LiteralPath @('docs/images/profiles-preview.png', 'docs/images/profiles-compact-preview.png') -Destination $previewImagesPath
     Copy-Item docs/WINDOWS_PREVIEW.md (Join-Path $outputPath 'README.md')
     # Keep the packaged documents navigable after renaming the preview guide
     # and roadmap. Developer-only instructions remain linked to the source repo.

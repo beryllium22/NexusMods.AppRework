@@ -3,9 +3,9 @@ This schema is written to a markdown file for both documentation and validation 
 models in the app, then validate the tests to update this file. 
 
 ## Statistics
-   - Fingerprint: 0x3A88794B73854C60
-   - Total attributes: 234
-   - Total namespaces: 76
+   - Fingerprint: 0xCA2AB80C849BA4D2
+   - Total attributes: 235
+   - Total namespaces: 77
    
 ## Attributes
 | AttributeId                                                                        | Type                    | Indexed | Many  | NoHistory | 
@@ -59,6 +59,7 @@ models in the app, then validate the tests to update this file.
 | NexusMods.Collections.NexusCollectionLoadoutGroup/LibraryFile                      | Reference               | False   | False | False     | 
 | NexusMods.Collections.NexusCollectionLoadoutGroup/Revision                         | Reference               | True    | False | False     | 
 | NexusMods.Collections.NexusCollectionReplicatedLoadoutGroup/Replicated             | Null                    | True    | False | False     | 
+| NexusMods.DataModel.ProfileCopyReservation/Reserved                                | Null                    | False   | False | False     | 
 | NexusMods.DataModel.SchemaVersioning.SchemaVersionModel/CurrentVersion             | UInt16                  | False   | False | False     | 
 | NexusMods.DataModel.SchemaVersions.MigrationLogItem/MigrationId                    | UInt16                  | False   | False | False     | 
 | NexusMods.DataModel.SchemaVersions.MigrationLogItem/RunAt                          | Int64                   | False   | False | False     | 

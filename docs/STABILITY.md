@@ -5,6 +5,12 @@ coverage. The associated pull request and **Clean Environment Tests** run are
 the source of execution results for a particular commit. A listed test is not
 evidence that every installed game or collection has been validated.
 
+The subsequent [profiles and compatibility increment](FEATURES_AND_COMPATIBILITY.md)
+adds collection retry/cancellation handling, isolated FOMOD sessions, recursive
+enabled-state checks, profile-copy recovery, deletion cleanup, and experimental
+game-specific validation. Its guide records those mechanisms and limits; the
+original stability protections below remain part of the regression gate.
+
 ## Crashes, hangs, and incorrect success states
 
 | Area | Confirmed failure | Change and regression coverage |
@@ -117,9 +123,12 @@ Outstanding work remains explicit:
   or deletion of a parent while an asynchronous installer runs need separate
   conflict-detection coverage.
 - Game-hash catalog gaps for newer large game archives still require catalog and
-  real-installation evidence. The backup safety limit is retained.
-- Mirror fallback, repairs for previously corrupted collection targets, and
-  unfinished Creation Engine diagnostics remain separate work.
+  real-installation evidence. The experimental integrations now retain their
+  initial disk baseline; the 5 GB backup batch limit remains.
+- Mirror fallback and repairs for previously corrupted collection targets remain
+  separate work. The ordinary Creation Engine missing-master path is completed;
+  independent plugin activation, LOOT metadata, extender/runtime checks, and
+  broader plugin compatibility still need implementation and validation.
 - Closing the entire UI while a modal is waiting needs dedicated dispatcher
   shutdown coverage. Normal overlay close/cancel tests do not certify that path.
 - The job monitor still needs a host-shutdown boundary that cancels and awaits

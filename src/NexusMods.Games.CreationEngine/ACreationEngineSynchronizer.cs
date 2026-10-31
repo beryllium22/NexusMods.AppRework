@@ -2,7 +2,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 using NexusMods.Abstractions.Loadouts;
-using NexusMods.Abstractions.Loadouts.Sorting;
 using NexusMods.Abstractions.Loadouts.Synchronizers;
 using NexusMods.Games.CreationEngine.Abstractions;
 using NexusMods.Paths;
@@ -14,13 +13,15 @@ namespace NexusMods.Games.CreationEngine;
 
 public abstract class ACreationEngineSynchronizer : ALoadoutSynchronizer
 {
-    private Dictionary<GamePath, IIntrinsicFile> _intrinsicFiles;
+    private readonly Dictionary<GamePath, IIntrinsicFile> _intrinsicFiles;
+    private readonly PluginsFile _pluginsFile;
+    protected override bool PreserveInitialDiskState => true;
     protected ACreationEngineSynchronizer(IServiceProvider provider, ICreationEngineGame game) : base(provider)
     {
-        var pluginsFile = new PluginsFile(provider.GetRequiredService<ILogger<PluginsFile>>(), game, provider.GetRequiredService<ISorter>());
+        _pluginsFile = new PluginsFile(provider.GetRequiredService<ILogger<PluginsFile>>(), game);
         _intrinsicFiles = new Dictionary<GamePath, IIntrinsicFile>()
         {
-            {pluginsFile.Path, pluginsFile},
+            {_pluginsFile.Path, _pluginsFile},
         };
     }
 
@@ -29,6 +30,9 @@ public abstract class ACreationEngineSynchronizer : ALoadoutSynchronizer
     protected override IGamePathFilter GamePathFilter { get; } = NexusMods.Abstractions.Loadouts.Synchronizers.GamePathFilters.Create(path => path.InFolder(SavesPath));
 
     public override Dictionary<GamePath, IIntrinsicFile> IntrinsicFiles(Loadout.ReadOnly _) => _intrinsicFiles;
+
+    protected override Task ValidateSyncTree(Loadout.ReadOnly loadout, Dictionary<GamePath, SyncNode> syncTree, CancellationToken cancellationToken)
+        => _pluginsFile.Validate(loadout, syncTree, cancellationToken);
     
     public override bool IsIgnoredBackupPath(GamePath path)
     {
